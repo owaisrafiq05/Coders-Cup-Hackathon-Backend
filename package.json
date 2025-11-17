@@ -1,0 +1,26 @@
+{
+  "name": "coders-cup-hackathon-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nodemon app.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/owaisrafiq05/Coders-Cup-Hackathon-Backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/owaisrafiq05/Coders-Cup-Hackathon-Backend/issues"
+  },
+  "homepage": "https://github.com/owaisrafiq05/Coders-Cup-Hackathon-Backend#readme",
+  "dependencies": {
+    "express": "^5.1.0",
+    "nodemon": "^3.1.11"
+  }
+}
