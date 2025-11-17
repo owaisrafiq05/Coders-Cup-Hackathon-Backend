@@ -20,7 +20,10 @@
   },
   "homepage": "https://github.com/owaisrafiq05/Coders-Cup-Hackathon-Backend#readme",
   "dependencies": {
+    "bcrypt": "^6.0.0",
+    "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "mongoose": "^8.20.0",
     "nodemon": "^3.1.11"
   }
 }
