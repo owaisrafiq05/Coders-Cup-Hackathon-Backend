@@ -20,6 +20,7 @@
   },
   "homepage": "https://github.com/owaisrafiq05/Coders-Cup-Hackathon-Backend#readme",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "bcrypt": "^6.0.0",
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
