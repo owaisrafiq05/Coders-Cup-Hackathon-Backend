@@ -16,6 +16,8 @@ import {
   getLoanRequests,
   approveLoanRequest,
   rejectLoanRequest,
+  triggerInstallmentReminders,
+  triggerOverdueNotices,
 } from '../controllers/admin.controller';
 
 // Adjust these imports to match your actual middleware filenames/exports
@@ -101,5 +103,17 @@ router.post('/loan-requests/:requestId/approve', approveLoanRequest);
  * POST /api/admin/loan-requests/:requestId/reject
  */
 router.post('/loan-requests/:requestId/reject', rejectLoanRequest);
+
+/**
+ * POST /api/admin/reminders/installments
+ * Manually trigger installment reminder emails
+ */
+router.post('/reminders/installments', triggerInstallmentReminders);
+
+/**
+ * POST /api/admin/reminders/overdue
+ * Manually trigger overdue notice emails
+ */
+router.post('/reminders/overdue', triggerOverdueNotices);
 
 export default router;

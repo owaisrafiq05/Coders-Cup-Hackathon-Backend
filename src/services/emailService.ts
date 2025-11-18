@@ -65,6 +65,7 @@ interface InstallmentReminderEmailData {
   amount: number;
   dueDate: string;
   daysUntilDue: number;
+  paymentUrl?: string;
 }
 
 interface PaymentConfirmationEmailData {
@@ -92,6 +93,7 @@ interface OverdueNoticeEmailData {
   daysOverdue: number;
   fineAmount: number;
   totalDue: number;
+  paymentUrl?: string;
 }
 
 interface DefaultNoticeEmailData {
@@ -635,6 +637,8 @@ class EmailService {
           .content { background: #f9f9f9; padding: 30px; border-radius: 5px; margin-top: 20px; }
           .reminder-box { background: #fff3cd; border: 2px solid #ffc107; padding: 20px; border-radius: 5px; margin: 15px 0; text-align: center; }
           .amount { font-size: 24px; color: #ff5722; font-weight: bold; }
+          .button { display: inline-block; padding: 15px 40px; background: #4CAF50; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; font-weight: bold; font-size: 16px; }
+          .button:hover { background: #45a049; }
           .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
         </style>
       </head>
@@ -653,7 +657,12 @@ class EmailService {
               <p>(${data.daysUntilDue} days remaining)</p>
             </div>
             <p>Please make sure to pay on time to avoid late fees.</p>
-            <p>Login to your account to make a payment.</p>
+            ${data.paymentUrl ? `
+            <div style="text-align: center;">
+              <a href="${data.paymentUrl}" class="button">Pay Now with Stripe</a>
+              <p style="margin-top: 10px; font-size: 12px; color: #666;">Click the button above to make a secure payment</p>
+            </div>
+            ` : '<p>Login to your account to make a payment.</p>'}
           </div>
           <div class="footer">
             <p>© 2025 Coders Cup Microfinance. All rights reserved.</p>
@@ -808,6 +817,8 @@ class EmailService {
           .content { background: #f9f9f9; padding: 30px; border-radius: 5px; margin-top: 20px; }
           .warning-box { background: #ffebee; border: 2px solid #ff5722; padding: 20px; border-radius: 5px; margin: 15px 0; }
           .urgent { color: #ff5722; font-weight: bold; font-size: 18px; }
+          .button { display: inline-block; padding: 15px 40px; background: #ff5722; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; font-weight: bold; font-size: 16px; }
+          .button:hover { background: #e64a19; }
           .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
         </style>
       </head>
@@ -828,7 +839,12 @@ class EmailService {
               <p><strong>Days Overdue:</strong> ${data.daysOverdue} days</p>
             </div>
             <p>Please make payment immediately to avoid further penalties and impact on your credit score.</p>
-            <p>Login to your account to pay now.</p>
+            ${data.paymentUrl ? `
+            <div style="text-align: center;">
+              <a href="${data.paymentUrl}" class="button">Pay Now with Stripe</a>
+              <p style="margin-top: 10px; font-size: 12px; color: #666;">Click the button above to make an immediate payment</p>
+            </div>
+            ` : '<p>Login to your account to pay now.</p>'}
           </div>
           <div class="footer">
             <p>© 2025 Coders Cup Microfinance. All rights reserved.</p>

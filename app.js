@@ -40,6 +40,10 @@ mongoose
   .connect(mongoUri)
   .then(() => {
     console.log('Connected to MongoDB');
+    
+    // Initialize cron jobs after successful DB connection
+    const { startInstallmentReminderJobs } = require('./src/jobs/installmentReminderJob');
+    startInstallmentReminderJobs();
   })
   .catch((err) => {
     console.error('MongoDB connection error:', err);

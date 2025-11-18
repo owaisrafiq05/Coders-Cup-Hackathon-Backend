@@ -1288,3 +1288,67 @@ export const waiveFine = async (req: Request, res: Response) => {
     });
   }
 };
+
+/**
+ * POST /api/admin/reminders/installments
+ * Manually trigger installment reminder emails
+ */
+export const triggerInstallmentReminders = async (req: Request, res: Response) => {
+  try {
+    const { triggerInstallmentReminders } = require('../jobs/installmentReminderJob');
+    
+    logger.info('Admin triggered installment reminders manually');
+    
+    // Run in background
+    triggerInstallmentReminders()
+      .then(() => {
+        logger.info('Manual installment reminders completed');
+      })
+      .catch((error: any) => {
+        logger.error('Error in manual installment reminders:', error);
+      });
+
+    return res.json({
+      success: true,
+      message: 'Installment reminder job triggered successfully. Emails will be sent in the background.',
+    });
+  } catch (err) {
+    console.error('triggerInstallmentReminders error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * POST /api/admin/reminders/overdue
+ * Manually trigger overdue notice emails
+ */
+export const triggerOverdueNotices = async (req: Request, res: Response) => {
+  try {
+    const { triggerOverdueNotices } = require('../jobs/installmentReminderJob');
+    
+    logger.info('Admin triggered overdue notices manually');
+    
+    // Run in background
+    triggerOverdueNotices()
+      .then(() => {
+        logger.info('Manual overdue notices completed');
+      })
+      .catch((error: any) => {
+        logger.error('Error in manual overdue notices:', error);
+      });
+
+    return res.json({
+      success: true,
+      message: 'Overdue notice job triggered successfully. Emails will be sent in the background.',
+    });
+  } catch (err) {
+    console.error('triggerOverdueNotices error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
