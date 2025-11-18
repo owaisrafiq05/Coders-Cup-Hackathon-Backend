@@ -1,20 +1,57 @@
-const express = require("express");
-const mongoose = require("mongoose");
-const dotenv = require("dotenv");
-const app = express();
-const port = 3000;
+// app.js
+require('dotenv').config();
 
-dotenv.config();
-mongoose.connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
-}).then(() => console.log("Connected to MongoDB"))
-  .catch((err) => console.log(err));
+// Allow requiring .ts files directly
+require('ts-node').register({
+  transpileOnly: true,            // faster, fine for dev
+  compilerOptions: {
+    module: 'commonjs'
+  }
+});
+
+const express = require('express');
+const bodyParser = require('body-parser');
+const mongoose = require('mongoose');
+const cors = require('cors');
+
+// Because index.ts uses `export default router`
+const mainRouter = require('./src/routes').default;
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+// Middleware (Express 5 compatible)
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(cors());
+
+// MongoDB connection
+const mongoUri = process.env.MONGODB_URI;
+if (!mongoUri) {
+  console.error('MONGO_URI is not defined in .env');
+  process.exit(1);
+}
+
+mongoose
+  .connect(mongoUri)
+  .then(() => {
+    console.log('Connected to MongoDB');
+  })
+  .catch((err) => {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  });
+
+// Routes
+app.use('/api', mainRouter);
+
+// Simple health route
+app.get('/', (req, res) => {
+  res.send('API is running');
+});
 
 app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
+  console.log(`Server is running on port ${port}`);
 });
 
-app.get("/", (req, res) => {
-    res.send("Hello World");
-});
+module.exports = app;
