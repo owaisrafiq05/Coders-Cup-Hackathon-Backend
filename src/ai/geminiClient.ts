@@ -3,7 +3,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import logger from '../utils/logger';
 
-const MODEL_NAME = process.env.GEMINI_MODEL_NAME || 'gemini-1.5-flash';
+const MODEL_NAME = process.env.GEMINI_MODEL_NAME || 'gemini-2.5-flash-lite';
 
 if (!process.env.GEMINI_API_KEY) {
   logger.warn(
