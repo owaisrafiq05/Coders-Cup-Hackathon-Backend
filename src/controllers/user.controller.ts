@@ -1,4 +1,3 @@
-// src/controllers/user.controller.ts
 import { Request, Response } from 'express-serve-static-core';
 import jwt from 'jsonwebtoken';
 
@@ -7,6 +6,8 @@ import User from '../models/User';
 import Loan, { LoanStatus } from '../models/Loan';
 import Installment, { InstallmentStatus } from '../models/Installment';
 import RiskProfile from '../models/RiskProfile';
+import LoanRequest, { LoanRequestStatus } from '../models/LoanRequest';
+import { emailService } from '../services/emailService';
 
 interface JwtPayload {
   userId: string;
@@ -26,7 +27,8 @@ function getAuthUser(req: Request, res: Response): { userId: string; role: strin
   const token = authHeader.split(' ')[1];
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || '') as JwtPayload;
+    const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET || '') as JwtPayload;
+    console.log(decoded);
     if (!decoded?.userId || !decoded?.role) {
       res.status(401).json({ success: false, message: 'Unauthorized: Invalid token' });
       return null;
@@ -401,6 +403,179 @@ export const getUserRiskProfile = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error in getUserRiskProfile:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+};
+
+/**
+ * POST /api/user/loan-request
+ * Protected (USER role)
+ * Request a new loan
+ */
+export const requestLoan = async (req: Request, res: Response) => {
+  const authUser = getAuthUser(req, res);
+  if (!authUser) return;
+
+  try {
+    const { requestedAmount, requestedTenure, purpose } = req.body as {
+      requestedAmount: number;
+      requestedTenure: number;
+      purpose?: string;
+    };
+
+    // Validation
+    if (!requestedAmount || !requestedTenure) {
+      return res.status(400).json({
+        success: false,
+        message: 'Requested amount and tenure are required',
+      });
+    }
+
+    if (requestedAmount < 5000 || requestedAmount > 500000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Loan amount must be between PKR 5,000 and PKR 500,000',
+      });
+    }
+
+    if (requestedTenure < 3 || requestedTenure > 60) {
+      return res.status(400).json({
+        success: false,
+        message: 'Loan tenure must be between 3 and 60 months',
+      });
+    }
+
+    // Check if user already has an active loan
+    const existingActiveLoan = await Loan.findOne({
+      userId: authUser.userId,
+      status: LoanStatus.ACTIVE,
+    });
+
+    if (existingActiveLoan) {
+      return res.status(400).json({
+        success: false,
+        message: 'You already have an active loan. Please complete it before requesting a new one.',
+      });
+    }
+
+    // Check if user has a pending loan request
+    const existingPendingRequest = await LoanRequest.findOne({
+      userId: authUser.userId,
+      status: LoanRequestStatus.PENDING,
+    });
+
+    if (existingPendingRequest) {
+      return res.status(400).json({
+        success: false,
+        message: 'You already have a pending loan request.',
+      });
+    }
+
+    // Check if user is approved
+    const user = await User.findById(authUser.userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    if (user.status !== 'APPROVED') {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account must be approved before requesting a loan',
+      });
+    }
+
+    // Create loan request
+    const loanRequest = new LoanRequest({
+      userId: authUser.userId,
+      requestedAmount,
+      requestedTenure,
+      purpose,
+      status: LoanRequestStatus.PENDING,
+    });
+
+    await loanRequest.save();
+
+    // Send email notification
+    try {
+      await emailService.sendLoanRequestProcessing(user.email, {
+        userName: user.fullName,
+        requestedAmount,
+        requestedTenure,
+        requestDate: new Date().toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        }),
+      }, user._id.toString());
+    } catch (emailError) {
+      console.error('Failed to send loan request email:', emailError);
+      // Don't fail the request if email fails
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Loan request submitted successfully. Our team will review it shortly.',
+      data: {
+        requestId: loanRequest._id.toString(),
+        requestedAmount,
+        requestedTenure,
+        status: loanRequest.status,
+        createdAt: loanRequest.createdAt.toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('Error in requestLoan:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+};
+
+/**
+ * GET /api/user/loan-requests
+ * Protected (USER role)
+ * Get user's loan request history
+ */
+export const getUserLoanRequests = async (req: Request, res: Response) => {
+  const authUser = getAuthUser(req, res);
+  if (!authUser) return;
+
+  try {
+    const loanRequests = await LoanRequest.find({
+      userId: authUser.userId,
+    })
+      .sort({ createdAt: -1 })
+      .limit(20);
+
+    const data = loanRequests.map((request) => ({
+      id: request._id.toString(),
+      requestedAmount: request.requestedAmount,
+      requestedTenure: request.requestedTenure,
+      purpose: request.purpose,
+      status: request.status,
+      rejectionReason: request.rejectionReason,
+      approvedAt: request.approvedAt?.toISOString(),
+      rejectedAt: request.rejectedAt?.toISOString(),
+      loanId: request.loanId?.toString(),
+      createdAt: request.createdAt.toISOString(),
+    }));
+
+    return res.json({
+      success: true,
+      data: {
+        loanRequests: data,
+        total: loanRequests.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error in getUserLoanRequests:', error);
     return res.status(500).json({
       success: false,
       message: 'Internal server error',

@@ -1,4 +1,3 @@
-// src/controllers/payment.controller.ts
 import { Request, Response } from 'express-serve-static-core';
 import { paymentService } from '../services/paymentService';
 import logger from '../utils/logger';

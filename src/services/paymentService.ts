@@ -1,10 +1,10 @@
-// src/services/paymentService.ts
 import Stripe from 'stripe';
 import logger from '../utils/logger';
 import Installment, { InstallmentStatus } from '../models/Installment';
 import Loan, { LoanStatus } from '../models/Loan';
 import PaymentTransaction, { PaymentStatus, PaymentMethod } from '../models/PaymentTransaction';
 import User from '../models/User';
+import { emailService } from './emailService';
 
 if (!process.env.STRIPE_SECRET_KEY) {
   logger.warn('STRIPE_SECRET_KEY is not set. Payment functionality will be disabled.');
@@ -314,6 +314,30 @@ class PaymentService {
         await loan.save();
       }
 
+      // Send payment confirmation email
+      try {
+        const user = await User.findById(installment.userId);
+        if (user) {
+          await emailService.sendPaymentConfirmation(user.email, {
+            userName: user.fullName,
+            installmentNumber: installment.installmentNumber,
+            amount: installment.amount,
+            paidDate: installment.paidDate!.toLocaleDateString('en-US', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            }),
+            receiptUrl: (session as any).receipt_url,
+            remainingBalance: loan?.outstandingBalance || 0,
+          }, user._id.toString());
+        }
+      } catch (emailError: any) {
+        logger.error('Failed to send payment confirmation email', {
+          error: emailError.message,
+          installmentId,
+        });
+      }
+
       logger.info('Payment processed successfully', {
         installmentId,
         loanId,
@@ -358,15 +382,42 @@ class PaymentService {
     });
 
     // Update transaction
-    await PaymentTransaction.findOneAndUpdate(
+    const transaction = await PaymentTransaction.findOneAndUpdate(
       {
         stripePaymentIntentId: paymentIntent.id,
       },
       {
         status: PaymentStatus.FAILED,
         failureReason: paymentIntent.last_payment_error?.message || 'Payment failed',
-      }
+      },
+      { new: true }
     );
+
+    // Send payment failure email
+    if (transaction) {
+      try {
+        const installment = await Installment.findById(transaction.installmentId);
+        const user = await User.findById(transaction.userId);
+        
+        if (user && installment) {
+          const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+          const retryUrl = `${baseUrl}/payments/retry/${installment._id}`;
+
+          await emailService.sendPaymentFailed(user.email, {
+            userName: user.fullName,
+            installmentNumber: installment.installmentNumber,
+            amount: installment.totalDue,
+            failureReason: paymentIntent.last_payment_error?.message || 'Payment failed',
+            retryUrl,
+          }, user._id.toString());
+        }
+      } catch (emailError: any) {
+        logger.error('Failed to send payment failure email', {
+          error: emailError.message,
+          paymentIntentId: paymentIntent.id,
+        });
+      }
+    }
   }
 
   /**

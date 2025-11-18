@@ -13,6 +13,9 @@ import {
   getDefaults,
   getDashboardStats,
   waiveFine,
+  getLoanRequests,
+  approveLoanRequest,
+  rejectLoanRequest,
 } from '../controllers/admin.controller';
 
 // Adjust these imports to match your actual middleware filenames/exports
@@ -83,5 +86,20 @@ router.get('/dashboard/stats', getDashboardStats);
  * POST /api/admin/waive-fine/:installmentId
  */
 router.post('/waive-fine/:installmentId', waiveFine);
+
+/**
+ * GET /api/admin/loan-requests
+ */
+router.get('/loan-requests', getLoanRequests);
+
+/**
+ * POST /api/admin/loan-requests/:requestId/approve
+ */
+router.post('/loan-requests/:requestId/approve', approveLoanRequest);
+
+/**
+ * POST /api/admin/loan-requests/:requestId/reject
+ */
+router.post('/loan-requests/:requestId/reject', rejectLoanRequest);
 
 export default router;

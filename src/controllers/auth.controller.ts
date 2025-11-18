@@ -1,9 +1,7 @@
-// src/controllers/auth.controller.ts
-// import { Request, Response } from 'express';
 import { Request, Response } from 'express-serve-static-core';
 import jwt from 'jsonwebtoken';
-import nodemailer from 'nodemailer';
 import User, { IUser, UserRole, UserStatus } from '../models/User';
+import { emailService } from '../services/emailService';
 
 // =========================
 // JWT Helpers
@@ -24,6 +22,7 @@ function signAccessToken(user: IUser): string {
     {
       sub: user._id.toString(),
       role: user.role,
+      userId: user._id.toString(),
     },
     JWT_ACCESS_SECRET,
     { expiresIn: ACCESS_TOKEN_EXPIRES_IN }
@@ -55,17 +54,8 @@ function verifyRefreshToken(token: string) {
 }
 
 // =========================
-// Nodemailer / OTP helpers
+// OTP helpers
 // =========================
-const transporter = nodemailer.createTransport({
-    service: 'gmail', // or "hotmail" / "yahoo" / "outlook" etc.
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
-
-
 const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 
 const otpStore = new Map<
@@ -79,17 +69,6 @@ const otpStore = new Map<
 function generateOtp(): string {
     return Math.floor(100000 + Math.random() * 900000).toString();
   }
-
-
-async function sendOtpEmail(email: string, code: string) {
-  await transporter.sendMail({
-    from: process.env.SMTP_USER,
-    to: email,
-    subject: 'Your OTP Code',
-    text: `Your OTP code is ${code}. It expires in 10 minutes.`,
-    html: `<p>Your OTP code is <strong>${code}</strong>. It expires in 10 minutes.</p>`
-  });
-}
 
 // =========================
 // Controllers
@@ -190,17 +169,21 @@ export const register = async (req: Request, res: Response) => {
 
     await user.save();
 
-    // Optionally send OTP on registration as well (email verification)
+    // Send OTP for verification
     try {
       const code = generateOtp();
       otpStore.set(user.email, {
         code,
         expiresAt: Date.now() + OTP_EXPIRY_MS,
       });
-      await sendOtpEmail(user.email, code);
-    } catch (otpError) {
-      console.error('Failed to send OTP email on registration:', otpError);
-      // Do NOT fail registration if OTP mail fails; just log
+      await emailService.sendOTP(user.email, {
+        userName: user.fullName,
+        otpCode: code,
+        expiryMinutes: 10,
+      }, user._id.toString());
+    } catch (emailError) {
+      console.error('Failed to send OTP email on registration:', emailError);
+      // Do NOT fail registration if email fails; just log
     }
 
     return res.status(201).json({
@@ -511,7 +494,11 @@ export const sendOtp = async (req: Request, res: Response) => {
       expiresAt: Date.now() + OTP_EXPIRY_MS,
     });
 
-    await sendOtpEmail(user.email, code);
+    await emailService.sendOTP(user.email, {
+      userName: user.fullName,
+      otpCode: code,
+      expiryMinutes: 10,
+    }, user._id.toString());
 
     return res.json({
       success: true,
@@ -563,6 +550,20 @@ export const verifyOtp = async (req: Request, res: Response) => {
 
     // OTP is valid
     otpStore.delete(email.toLowerCase());
+
+    // Send welcome email after successful OTP verification
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (user) {
+      try {
+        await emailService.sendWelcome(user.email, {
+          userName: user.fullName,
+          email: user.email,
+        }, user._id.toString());
+      } catch (emailError) {
+        console.error('Failed to send welcome email:', emailError);
+        // Don't fail the verification if email fails
+      }
+    }
 
     return res.json({
       success: true,

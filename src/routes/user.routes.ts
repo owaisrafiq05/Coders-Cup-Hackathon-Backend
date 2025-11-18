@@ -1,4 +1,3 @@
-// src/routes/user.routes.ts
 import { Router } from 'express';
 import {
   getProfile,
@@ -7,6 +6,8 @@ import {
   getUserInstallments,
   getUserInstallmentById,
   getUserRiskProfile,
+  requestLoan,
+  getUserLoanRequests,
 } from '../controllers/user.controller';
 
 const router = Router();
@@ -47,5 +48,19 @@ router.get('/installment/:id', getUserInstallmentById);
  * Protected (USER role)
  */
 router.get('/risk-profile', getUserRiskProfile);
+
+/**
+ * POST /api/user/loan-request
+ * Protected (USER role)
+ * Request a new loan
+ */
+router.post('/loan-request', requestLoan);
+
+/**
+ * GET /api/user/loan-requests
+ * Protected (USER role)
+ * Get user's loan request history
+ */
+router.get('/loan-requests', getUserLoanRequests);
 
 export default router;

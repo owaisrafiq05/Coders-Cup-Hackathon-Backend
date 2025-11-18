@@ -1,4 +1,3 @@
-// src/controllers/admin.controller.ts
 import { Request, Response } from 'express-serve-static-core';
 import mongoose from 'mongoose';
 
@@ -7,9 +6,11 @@ import Loan, { LoanStatus } from '../models/Loan';
 import Installment, { InstallmentStatus } from '../models/Installment';
 import RiskProfile from '../models/RiskProfile';
 import PaymentTransaction from '../models/PaymentTransaction';
+import LoanRequest, { LoanRequestStatus } from '../models/LoanRequest';
 
 import { riskScoringEngine } from '../ai/riskScoringEngine';
 import logger from '../utils/logger';
+import { emailService } from '../services/emailService';
 
 // --------------------
 // Helpers
@@ -135,6 +136,21 @@ export const approveUser = async (req: Request, res: Response) => {
     user.approvedAt = new Date();
     await user.save();
 
+    // Send approval email
+    try {
+      await emailService.sendAccountApproved(user.email, {
+        userName: user.fullName,
+        approvalDate: user.approvedAt.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        }),
+      }, user._id.toString());
+    } catch (emailError) {
+      logger.error('Failed to send approval email', { error: emailError });
+      // Don't fail the approval if email fails
+    }
+
     // Auto-trigger AI risk scoring (best-effort, non-blocking)
     try {
       logger.info('Starting risk score calculation (auto after approval)', {
@@ -194,6 +210,17 @@ export const rejectUser = async (req: Request, res: Response) => {
     user.status = UserStatus.REJECTED;
     user.rejectionReason = reason;
     await user.save();
+
+    // Send rejection email
+    try {
+      await emailService.sendAccountRejected(user.email, {
+        userName: user.fullName,
+        reason: reason,
+      }, user._id.toString());
+    } catch (emailError) {
+      logger.error('Failed to send rejection email', { error: emailError });
+      // Don't fail the rejection if email fails
+    }
 
     return res.json({
       success: true,
@@ -415,6 +442,30 @@ export const createLoanForUser = async (req: Request, res: Response) => {
   
       await Installment.insertMany(installmentDocs);
   
+      // ================================
+      // Send Loan Created Email
+      // ================================
+      try {
+        const user = await User.findById(userId);
+        if (user) {
+          await emailService.sendLoanCreated(user.email, {
+            userName: user.fullName,
+            loanAmount: principalAmount,
+            interestRate,
+            tenureMonths,
+            monthlyInstallment: roundedEMI,
+            firstPaymentDate: installmentDocs[0].dueDate.toLocaleDateString('en-US', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            }),
+          }, user._id.toString());
+        }
+      } catch (emailError) {
+        logger.error('Failed to send loan created email', { error: emailError });
+        // Don't fail the loan creation if email fails
+      }
+
       // ================================
       // Response
       // ================================
@@ -866,6 +917,321 @@ export const getDashboardStats = async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error('getDashboardStats error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * GET /api/admin/loan-requests
+ * Get all loan requests with filters
+ */
+export const getLoanRequests = async (req: Request, res: Response) => {
+  try {
+    const { status, userId } = req.query as {
+      status?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
+      userId?: string;
+    };
+
+    const { page, limit, skip } = getPagination(req.query);
+
+    const filter: any = {};
+    if (status) filter.status = status;
+    if (userId) filter.userId = userId;
+
+    const [loanRequests, totalCount] = await Promise.all([
+      LoanRequest.find(filter)
+        .populate('userId')
+        .populate('loanId')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      LoanRequest.countDocuments(filter),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        loanRequests: loanRequests.map((request) => {
+          const userDoc = request.userId as any;
+          return {
+            id: request._id.toString(),
+            user: {
+              id: userDoc?._id?.toString(),
+              fullName: userDoc?.fullName,
+              email: userDoc?.email,
+              phone: userDoc?.phone,
+            },
+            requestedAmount: request.requestedAmount,
+            requestedTenure: request.requestedTenure,
+            purpose: request.purpose,
+            status: request.status,
+            rejectionReason: request.rejectionReason,
+            approvedAt: request.approvedAt?.toISOString(),
+            rejectedAt: request.rejectedAt?.toISOString(),
+            loanId: request.loanId?.toString(),
+            createdAt: request.createdAt.toISOString(),
+          };
+        }),
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(totalCount / limit),
+          totalCount,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('getLoanRequests error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * POST /api/admin/loan-requests/:requestId/approve
+ * Approve a loan request and create loan with installments
+ */
+export const approveLoanRequest = async (req: Request, res: Response) => {
+  try {
+    const adminId = req.user?.id;
+    const { requestId } = req.params;
+    const { interestRate, startDate, notes } = req.body as {
+      interestRate: number;
+      startDate?: string;
+      notes?: string;
+    };
+
+    if (!interestRate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Interest rate is required',
+      });
+    }
+
+    // Find the loan request
+    const loanRequest = await LoanRequest.findById(requestId).populate('userId');
+    if (!loanRequest) {
+      return res.status(404).json({
+        success: false,
+        message: 'Loan request not found',
+      });
+    }
+
+    if (loanRequest.status !== LoanRequestStatus.PENDING) {
+      return res.status(400).json({
+        success: false,
+        message: `Loan request is already ${loanRequest.status.toLowerCase()}`,
+      });
+    }
+
+    const userDoc = loanRequest.userId as any;
+    if (!userDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    // Check if user already has an active loan
+    const existingActiveLoan = await Loan.findOne({
+      userId: userDoc._id,
+      status: LoanStatus.ACTIVE,
+    });
+
+    if (existingActiveLoan) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already has an active loan',
+      });
+    }
+
+    // Parse start date
+    const start = startDate ? new Date(startDate) : new Date();
+    if (isNaN(start.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid startDate format',
+      });
+    }
+
+    // Calculate EMI
+    const principalAmount = loanRequest.requestedAmount;
+    const tenureMonths = loanRequest.requestedTenure;
+    const monthlyRate = interestRate / 12 / 100;
+
+    const monthlyInstallment =
+      (principalAmount *
+        monthlyRate *
+        Math.pow(1 + monthlyRate, tenureMonths)) /
+      (Math.pow(1 + monthlyRate, tenureMonths) - 1);
+
+    const roundedEMI = Math.round(monthlyInstallment);
+    const totalAmount = roundedEMI * tenureMonths;
+
+    const endDate = new Date(start);
+    endDate.setMonth(endDate.getMonth() + tenureMonths);
+
+    // Create loan
+    const loan = await Loan.create({
+      userId: userDoc._id,
+      principalAmount,
+      interestRate,
+      tenureMonths,
+      monthlyInstallment: roundedEMI,
+      totalAmount,
+      outstandingBalance: totalAmount,
+      startDate: start,
+      endDate,
+      status: LoanStatus.ACTIVE,
+      notes,
+      createdBy: adminId,
+    });
+
+    // Generate Installments
+    const installmentDocs = [];
+
+    for (let i = 1; i <= tenureMonths; i++) {
+      const due = new Date(start);
+      due.setMonth(start.getMonth() + i);
+
+      const grace = new Date(due);
+      grace.setDate(grace.getDate() + 10);
+
+      installmentDocs.push({
+        loanId: loan._id,
+        userId: userDoc._id,
+        installmentNumber: i,
+        amount: roundedEMI,
+        totalDue: roundedEMI,
+        dueDate: due,
+        gracePeriodEndDate: grace,
+        status: InstallmentStatus.PENDING,
+      });
+    }
+
+    await Installment.insertMany(installmentDocs);
+
+    // Update loan request status
+    loanRequest.status = LoanRequestStatus.APPROVED;
+    loanRequest.approvedBy = adminId as any;
+    loanRequest.approvedAt = new Date();
+    loanRequest.loanId = loan._id;
+    await loanRequest.save();
+
+    // Send approval email
+    try {
+      await emailService.sendLoanApproved(userDoc.email, {
+        userName: userDoc.fullName,
+        loanAmount: principalAmount,
+        interestRate,
+        tenureMonths,
+        monthlyInstallment: roundedEMI,
+        firstPaymentDate: installmentDocs[0].dueDate.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        }),
+        approvalDate: new Date().toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        }),
+      }, userDoc._id.toString());
+    } catch (emailError) {
+      logger.error('Failed to send loan approval email', { error: emailError });
+      // Don't fail the approval if email fails
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Loan request approved and loan created successfully',
+      data: {
+        requestId: loanRequest._id.toString(),
+        loanId: loan._id.toString(),
+        userId: userDoc._id.toString(),
+        principalAmount,
+        interestRate,
+        tenureMonths,
+        monthlyInstallment: roundedEMI,
+        totalAmount,
+        startDate: start.toISOString(),
+        endDate: endDate.toISOString(),
+        installmentsCreated: installmentDocs.length,
+      },
+    });
+  } catch (error) {
+    console.error('approveLoanRequest error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * POST /api/admin/loan-requests/:requestId/reject
+ * Reject a loan request
+ */
+export const rejectLoanRequest = async (req: Request, res: Response) => {
+  try {
+    const { requestId } = req.params;
+    const { reason } = req.body as { reason: string };
+
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rejection reason is required',
+      });
+    }
+
+    const loanRequest = await LoanRequest.findById(requestId).populate('userId');
+    if (!loanRequest) {
+      return res.status(404).json({
+        success: false,
+        message: 'Loan request not found',
+      });
+    }
+
+    if (loanRequest.status !== LoanRequestStatus.PENDING) {
+      return res.status(400).json({
+        success: false,
+        message: `Loan request is already ${loanRequest.status.toLowerCase()}`,
+      });
+    }
+
+    loanRequest.status = LoanRequestStatus.REJECTED;
+    loanRequest.rejectionReason = reason;
+    loanRequest.rejectedAt = new Date();
+    await loanRequest.save();
+
+    // Send rejection email (you can create a separate email template if needed)
+    const userDoc = loanRequest.userId as any;
+    if (userDoc) {
+      try {
+        await emailService.sendAccountRejected(userDoc.email, {
+          userName: userDoc.fullName,
+          reason: `Your loan request for PKR ${loanRequest.requestedAmount.toLocaleString()} has been rejected. Reason: ${reason}`,
+        }, userDoc._id.toString());
+      } catch (emailError) {
+        logger.error('Failed to send loan rejection email', { error: emailError });
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Loan request rejected',
+      data: {
+        requestId: loanRequest._id.toString(),
+        status: loanRequest.status,
+        rejectionReason: reason,
+      },
+    });
+  } catch (error) {
+    console.error('rejectLoanRequest error:', error);
     return res.status(500).json({
       success: false,
       message: 'Server error',
