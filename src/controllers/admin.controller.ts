@@ -1,107 +1,110 @@
 // src/controllers/admin.controller.ts
 import { Request, Response } from 'express-serve-static-core';
 import mongoose from 'mongoose';
-import User, { IUser, UserStatus, UserRole } from '../models/User';
-import RiskProfile, { IRiskProfile, RiskLevel } from '../models/RiskProfile';
-import Loan, { ILoan, LoanStatus } from '../models/Loan';
-import Installment from '../models/Installment';
-import { riskScoringEngine } from '../ai/riskScoringEngine';
-import { calculateMonthlyInstallment } from '../utils/calculations';
 
-// Extend Request to include authenticated user info
-interface AuthRequest extends Request {
-  user?: {
-    id: string;
-    role: UserRole;
-    email?: string;
-  };
+import User, { UserStatus } from '../models/User';
+import Loan, { LoanStatus } from '../models/Loan';
+import Installment, { InstallmentStatus } from '../models/Installment';
+import RiskProfile from '../models/RiskProfile';
+import PaymentTransaction from '../models/PaymentTransaction';
+
+import { riskScoringEngine } from '../ai/riskScoringEngine';
+import logger from '../utils/logger';
+
+// --------------------
+// Helpers
+// --------------------
+
+const DEFAULT_PAGE = 1;
+const DEFAULT_LIMIT = 20;
+
+function getPagination(query: any) {
+  const page = Math.max(parseInt(query.page as string, 10) || DEFAULT_PAGE, 1);
+  const limit = Math.max(parseInt(query.limit as string, 10) || DEFAULT_LIMIT, 1);
+  const skip = (page - 1) * limit;
+  return { page, limit, skip };
 }
+
+// --------------------
+// Admin Controllers
+// --------------------
 
 /**
  * GET /api/admin/users
- * Query: ?status=&page=&limit=&search=
+ * Query: ?status=PENDING&page=1&limit=20&search=john
  */
-export const getUsers = async (req: AuthRequest, res: Response) => {
+export const getUsers = async (req: Request, res: Response) => {
   try {
-    const {
-      status,
-      page = '1',
-      limit = '20',
-      search,
-    } = req.query as {
-      status?: string;
+    const { status, search } = req.query as {
+      status?: 'PENDING' | 'APPROVED' | 'REJECTED';
+      search?: string;
       page?: string;
       limit?: string;
-      search?: string;
     };
 
-    const pageNum = Math.max(parseInt(page || '1', 10), 1);
-    const limitNum = Math.max(parseInt(limit || '20', 10), 1);
+    const { page, limit, skip } = getPagination(req.query);
 
-    const filter: any = { role: UserRole.USER };
-    if (status && ['PENDING', 'APPROVED', 'REJECTED'].includes(status)) {
+    const filter: any = {};
+    if (status) {
       filter.status = status;
     }
 
     if (search) {
-      const searchRegex = new RegExp(search, 'i');
+      const regex = new RegExp(search, 'i');
       filter.$or = [
-        { fullName: searchRegex },
-        { email: searchRegex },
-        { phone: searchRegex },
-        { city: searchRegex },
+        { fullName: regex },
+        { email: regex },
+        { phone: regex },
+        { city: regex },
       ];
     }
 
-    const totalCount = await User.countDocuments(filter);
+    const [users, totalCount] = await Promise.all([
+      User.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      User.countDocuments(filter),
+    ]);
 
-    const users = await User.find(filter)
-      .sort({ createdAt: -1 })
-      .skip((pageNum - 1) * limitNum)
-      .limit(limitNum)
-      .lean();
-
-    // Attach latest riskLevel if exists
+    // fetch risk profiles for these users
     const userIds = users.map((u) => u._id);
-    const riskProfiles = await RiskProfile.find({
-      userId: { $in: userIds },
-    }).lean();
-
-    const riskMap = new Map<string, IRiskProfile>();
-    riskProfiles.forEach((rp) => {
-      riskMap.set(rp.userId.toString(), rp as unknown as IRiskProfile);
-    });
-
-    const responseUsers = users.map((u) => ({
-      id: u._id.toString(),
-      fullName: u.fullName,
-      email: u.email,
-      phone: u.phone,
-      city: u.city,
-      province: u.province,
-      monthlyIncome: u.monthlyIncome,
-      employmentType: u.employmentType,
-      status: u.status,
-      createdAt: u.createdAt,
-      riskLevel: riskMap.get(u._id.toString())?.riskLevel,
-    }));
+    const riskProfiles = await RiskProfile.find({ userId: { $in: userIds } });
+    const riskByUserId = new Map(
+      riskProfiles.map((rp) => [rp.userId.toString(), rp])
+    );
 
     return res.json({
       success: true,
       data: {
-        users: responseUsers,
+        users: users.map((u) => {
+          const rp = riskByUserId.get(u._id.toString());
+          return {
+            id: u._id.toString(),
+            fullName: u.fullName,
+            email: u.email,
+            phone: u.phone,
+            city: u.city,
+            province: u.province,
+            monthlyIncome: u.monthlyIncome,
+            employmentType: u.employmentType,
+            status: u.status,
+            createdAt: u.createdAt.toISOString(),
+            riskLevel: rp?.riskLevel,
+          };
+        }),
         pagination: {
-          currentPage: pageNum,
-          totalPages: Math.ceil(totalCount / limitNum),
+          currentPage: page,
+          totalPages: Math.ceil(totalCount / limit),
           totalCount,
         },
       },
     });
-  } catch (error: any) {
-    console.error('Error in getUsers:', error);
+  } catch (err) {
+    console.error('getUsers error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch users',
+      message: 'Server error',
     });
   }
 };
@@ -109,7 +112,7 @@ export const getUsers = async (req: AuthRequest, res: Response) => {
 /**
  * PATCH /api/admin/users/:id/approve
  */
-export const approveUser = async (req: AuthRequest, res: Response) => {
+export const approveUser = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
@@ -130,20 +133,21 @@ export const approveUser = async (req: AuthRequest, res: Response) => {
 
     user.status = UserStatus.APPROVED;
     user.approvedAt = new Date();
-    user.approvedBy = req.user ? new mongoose.Types.ObjectId(req.user.id) : undefined;
-    user.rejectionReason = undefined;
-
     await user.save();
 
-    // NOTE: According to the doc, approval should automatically trigger risk scoring.
-    // We fire-and-forget here; the explicit risk-score endpoint is still available.
+    // Auto-trigger AI risk scoring (best-effort, non-blocking)
     try {
+      logger.info('Starting risk score calculation (auto after approval)', {
+        userId: user._id.toString(),
+      });
+
       await riskScoringEngine.calculateRiskScore(user._id.toString(), {
         recalculate: true,
+        triggerSource: 'USER_APPROVAL',
       });
-    } catch (err) {
-      console.error('Failed to auto-trigger risk scoring after approval:', err);
-      // Do not fail the main request because of AI error.
+    } catch (e) {
+      console.error('Failed to auto-trigger risk scoring after approval:', e);
+      // do not fail response if AI part fails
     }
 
     return res.json({
@@ -151,15 +155,15 @@ export const approveUser = async (req: AuthRequest, res: Response) => {
       message: 'User approved successfully',
       data: {
         userId: user._id.toString(),
-        status: UserStatus.APPROVED,
-        approvedAt: user.approvedAt?.toISOString(),
+        status: 'APPROVED' as const,
+        approvedAt: user.approvedAt?.toISOString() || new Date().toISOString(),
       },
     });
-  } catch (error: any) {
-    console.error('Error in approveUser:', error);
+  } catch (err) {
+    console.error('approveUser error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to approve user',
+      message: 'Server error',
     });
   }
 };
@@ -167,12 +171,12 @@ export const approveUser = async (req: AuthRequest, res: Response) => {
 /**
  * PATCH /api/admin/users/:id/reject
  */
-export const rejectUser = async (req: AuthRequest, res: Response) => {
+export const rejectUser = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { reason } = req.body as { reason?: string };
+    const { reason } = req.body as { reason: string };
 
-    if (!reason || !reason.trim()) {
+    if (!reason) {
       return res.status(400).json({
         success: false,
         message: 'Rejection reason is required',
@@ -189,9 +193,6 @@ export const rejectUser = async (req: AuthRequest, res: Response) => {
 
     user.status = UserStatus.REJECTED;
     user.rejectionReason = reason;
-    user.approvedAt = undefined;
-    user.approvedBy = undefined;
-
     await user.save();
 
     return res.json({
@@ -199,91 +200,29 @@ export const rejectUser = async (req: AuthRequest, res: Response) => {
       message: 'User rejected successfully',
       data: {
         userId: user._id.toString(),
-        status: UserStatus.REJECTED,
+        status: 'REJECTED' as const,
         rejectionReason: reason,
       },
     });
-  } catch (error: any) {
-    console.error('Error in rejectUser:', error);
+  } catch (err) {
+    console.error('rejectUser error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to reject user',
+      message: 'Server error',
     });
   }
 };
 
 /**
  * POST /api/admin/risk-score/:userId
- * Triggers AI risk assessment via Gemini
+ * Triggers AI risk assessment
  */
-export const triggerRiskScore = async (req: AuthRequest, res: Response) => {
+export const triggerRiskScore = async (req: Request, res: Response) => {
   try {
     const { userId } = req.params;
     const { recalculate } = req.body as { recalculate?: boolean };
 
     const user = await User.findById(userId);
-    if (!user || user.role !== UserRole.USER) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found',
-      });
-    }
-
-    // Use existing risk profile if not recalc requested
-    let existing = await RiskProfile.findOne({ userId: user._id });
-    if (existing && !recalculate) {
-      return res.json({
-        success: true,
-        message: 'Existing risk profile returned',
-        data: {
-          userId: user._id.toString(),
-          riskLevel: existing.riskLevel,
-          riskScore: existing.riskScore,
-          riskReasons: existing.riskReasons,
-          recommendedMaxLoan: existing.recommendedMaxLoan,
-          recommendedTenure: existing.recommendedTenure,
-          defaultProbability: existing.defaultProbability,
-          calculatedAt: existing.lastCalculated.toISOString(),
-        },
-      });
-    }
-
-    // Call Gemini-based risk engine
-    const profile = await riskScoringEngine.calculateRiskScore(user._id.toString(), {
-      recalculate: !!recalculate,
-    });
-
-    return res.json({
-      success: true,
-      message: 'Risk score calculated successfully',
-      data: {
-        userId: user._id.toString(),
-        riskLevel: profile.riskLevel,
-        riskScore: profile.riskScore,
-        riskReasons: profile.riskReasons,
-        recommendedMaxLoan: profile.recommendedMaxLoan,
-        recommendedTenure: profile.recommendedTenure,
-        defaultProbability: profile.defaultProbability,
-        calculatedAt: profile.lastCalculated.toISOString(),
-      },
-    });
-  } catch (error: any) {
-    console.error('Error in triggerRiskScore:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to calculate risk score',
-    });
-  }
-};
-
-/**
- * GET /api/admin/risk-profile/:userId
- */
-export const getRiskProfile = async (req: AuthRequest, res: Response) => {
-  try {
-    const { userId } = req.params;
-
-    const user = await User.findById(userId).lean();
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -291,14 +230,57 @@ export const getRiskProfile = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const riskProfile = await RiskProfile.findOne({ userId: user._id }).lean();
-    const loans = await Loan.find({ userId: user._id }).lean();
+    const result = await riskScoringEngine.calculateRiskScore(userId, {
+      recalculate: !!recalculate,
+      triggerSource: 'MANUAL_ADMIN',
+    });
+
+    return res.json({
+      success: true,
+      message: 'Risk score calculated successfully',
+      data: {
+        userId: user._id.toString(),
+        riskLevel: result.riskLevel,
+        riskScore: result.riskScore,
+        riskReasons: result.riskReasons,
+        recommendedMaxLoan: result.recommendedMaxLoan,
+        recommendedTenure: result.recommendedTenure,
+        defaultProbability: result.defaultProbability,
+        calculatedAt: result.lastCalculated.toISOString(), // <-- uses lastCalculated from IRiskProfile
+      },
+    });
+  } catch (err) {
+    console.error('triggerRiskScore error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * GET /api/admin/risk-profile/:userId
+ */
+export const getRiskProfile = async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.params;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    const riskProfile = await RiskProfile.findOne({ userId });
+    const loans = await Loan.find({ userId });
 
     const loanHistory = loans.map((loan) => ({
       loanId: loan._id.toString(),
       amount: loan.principalAmount,
       status: loan.status,
-      onTimePayments: 0, // Could be derived from Installment history if needed
+      onTimePayments: 0,    // you can compute from Installment later
       latePayments: 0,
       missedPayments: 0,
     }));
@@ -329,11 +311,11 @@ export const getRiskProfile = async (req: AuthRequest, res: Response) => {
         loanHistory,
       },
     });
-  } catch (error: any) {
-    console.error('Error in getRiskProfile:', error);
+  } catch (err) {
+    console.error('getRiskProfile error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch risk profile',
+      message: 'Server error',
     });
   }
 };
@@ -341,110 +323,140 @@ export const getRiskProfile = async (req: AuthRequest, res: Response) => {
 /**
  * POST /api/admin/loans/:userId
  * Create and assign a loan to an approved user
+ * Also creates Installment documents
  */
-export const createLoanForUser = async (req: AuthRequest, res: Response) => {
-  try {
-    const { userId } = req.params;
-    const { principalAmount, interestRate, tenureMonths, startDate, notes } =
-      req.body as {
-        principalAmount: number;
-        interestRate: number;
-        tenureMonths: number;
-        startDate: string;
-        notes?: string;
-      };
-
-    const user = await User.findById(userId);
-    if (!user || user.status !== UserStatus.APPROVED) {
-      return res.status(400).json({
+// ================================
+// CREATE LOAN FOR USER (FIXED)
+// ================================
+export const createLoanForUser = async (req: Request, res: Response) => {
+    try {
+      const adminId = req.user?.id;
+  
+      const { userId } = req.params;
+      const { principalAmount, interestRate, tenureMonths, startDate, notes } =
+        req.body;
+  
+      if (!principalAmount || !interestRate || !tenureMonths || !startDate) {
+        return res.status(400).json({
+          success: false,
+          message: "Missing required fields",
+        });
+      }
+  
+      const start = new Date(startDate);
+      if (isNaN(start.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid startDate format",
+        });
+      }
+  
+      // ================================
+      // EMI CALCULATION
+      // ================================
+      const monthlyRate = interestRate / 12 / 100;
+  
+      const monthlyInstallment =
+        (principalAmount *
+          monthlyRate *
+          Math.pow(1 + monthlyRate, tenureMonths)) /
+        (Math.pow(1 + monthlyRate, tenureMonths) - 1);
+  
+      const roundedEMI = Math.round(monthlyInstallment);
+      const totalAmount = roundedEMI * tenureMonths;
+  
+      const endDate = new Date(start);
+      endDate.setMonth(endDate.getMonth() + tenureMonths);
+  
+      const outstandingBalance = totalAmount;
+  
+      // ================================
+      // 2. Save LOAN
+      // ================================
+      const loan = await Loan.create({
+        userId,
+        principalAmount,
+        interestRate,
+        tenureMonths,
+        monthlyInstallment: roundedEMI,
+        totalAmount,
+        outstandingBalance,
+        startDate: start,
+        endDate,
+        status: "ACTIVE",
+        notes,
+        createdBy: adminId,
+      });
+  
+      // ================================
+      // 3. Generate Installments (UPDATED)
+      // ================================
+      const installmentDocs = [];
+  
+      for (let i = 1; i <= tenureMonths; i++) {
+        const due = new Date(start);
+        due.setMonth(start.getMonth() + i);
+  
+        // Grace period = 10 days after due date
+        const grace = new Date(due);
+        grace.setDate(grace.getDate() + 10);
+  
+        installmentDocs.push({
+          loanId: loan._id,
+          userId,
+          installmentNumber: i,         // NEW REQUIRED FIELD
+          amount: roundedEMI,
+          totalDue: roundedEMI,         // NEW REQUIRED FIELD
+          dueDate: due,
+          gracePeriodEndDate: grace,    // NEW REQUIRED FIELD
+          status: "PENDING",
+        });
+      }
+  
+      await Installment.insertMany(installmentDocs);
+  
+      // ================================
+      // Response
+      // ================================
+      return res.status(201).json({
+        success: true,
+        message: "Loan created successfully",
+        data: {
+          loanId: loan._id,
+          userId,
+          principalAmount,
+          interestRate,
+          tenureMonths,
+          monthlyInstallment: roundedEMI,
+          totalAmount,
+          outstandingBalance,
+          startDate: start,
+          endDate,
+          status: loan.status,
+          installmentSchedule: installmentDocs.map((i) => ({
+            month: i.installmentNumber,
+            dueDate: i.dueDate,
+            amount: i.amount,
+            gracePeriodEndDate: i.gracePeriodEndDate,
+          })),
+        },
+      });
+  
+    } catch (error) {
+      console.error("createLoanForUser error:", error);
+      return res.status(500).json({
         success: false,
-        message: 'User must exist and be APPROVED before creating a loan',
+        message: "Server error",
+        error: error.message,
       });
     }
-
-    const start = new Date(startDate);
-    if (isNaN(start.getTime())) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid startDate',
-      });
-    }
-
-    // Calculate EMI and schedule
-    const { monthlyInstallment, totalAmount } = calculateMonthlyInstallment(
-      principalAmount,
-      interestRate,
-      tenureMonths
-    );
-
-    const schedule = [];
-    const startMonth = new Date(start);
-    for (let i = 1; i <= tenureMonths; i++) {
-      const due = new Date(
-        startMonth.getFullYear(),
-        startMonth.getMonth() + i,
-        startMonth.getDate()
-      );
-      schedule.push({
-        month: i,
-        dueDate: due,
-        amount: monthlyInstallment,
-      });
-    }
-
-    const loan = await Loan.create({
-      userId: user._id,
-      createdBy: req.user ? req.user.id : undefined,
-      principalAmount,
-      interestRate,
-      tenureMonths,
-      monthlyInstallment,
-      totalAmount,
-      outstandingBalance: totalAmount,
-      totalRepaid: 0,
-      totalFines: 0,
-      startDate: start,
-      endDate: schedule[schedule.length - 1].dueDate,
-      status: LoanStatus.ACTIVE,
-      installmentSchedule: schedule,
-      notes: notes || undefined,
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: 'Loan created successfully',
-      data: {
-        loanId: loan._id.toString(),
-        userId: user._id.toString(),
-        principalAmount: loan.principalAmount,
-        interestRate: loan.interestRate,
-        tenureMonths: loan.tenureMonths,
-        monthlyInstallment: loan.monthlyInstallment,
-        totalAmount: loan.totalAmount,
-        startDate: loan.startDate.toISOString(),
-        endDate: loan.endDate.toISOString(),
-        status: loan.status,
-        installmentSchedule: loan.installmentSchedule.map((i) => ({
-          month: i.month,
-          dueDate: i.dueDate,
-          amount: i.amount,
-        })),
-      },
-    });
-  } catch (error: any) {
-    console.error('Error in createLoanForUser:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create loan',
-    });
-  }
-};
+  };
+    
 
 /**
  * PUT /api/admin/loans/:loanId
- * Update loan notes and/or status (ACTIVE | CANCELLED)
  */
-export const updateLoan = async (req: AuthRequest, res: Response) => {
+export const updateLoan = async (req: Request, res: Response) => {
   try {
     const { loanId } = req.params;
     const { notes, status } = req.body as {
@@ -467,16 +479,9 @@ export const updateLoan = async (req: AuthRequest, res: Response) => {
       updatedFields.push('notes');
     }
 
-    if (status && [LoanStatus.ACTIVE, LoanStatus.CANCELLED].includes(status)) {
+    if (status && status !== loan.status) {
       loan.status = status;
       updatedFields.push('status');
-    }
-
-    if (!updatedFields.length) {
-      return res.status(400).json({
-        success: false,
-        message: 'No valid fields to update',
-      });
     }
 
     await loan.save();
@@ -489,285 +494,232 @@ export const updateLoan = async (req: AuthRequest, res: Response) => {
         updatedFields,
       },
     });
-  } catch (error: any) {
-    console.error('Error in updateLoan:', error);
+  } catch (err) {
+    console.error('updateLoan error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to update loan',
+      message: 'Server error',
     });
   }
 };
 
 /**
  * GET /api/admin/loans
- * Query: ?status=&userId=&page=&limit=
+ * Query: ?status=ACTIVE&userId=xxx&page=1&limit=20
  */
-export const getLoans = async (req: AuthRequest, res: Response) => {
+export const getLoans = async (req: Request, res: Response) => {
   try {
-    const {
-      status,
-      userId,
-      page = '1',
-      limit = '20',
-    } = req.query as {
-      status?: string;
+    const { status, userId } = req.query as {
+      status?: 'ACTIVE' | 'COMPLETED' | 'DEFAULTED';
       userId?: string;
-      page?: string;
-      limit?: string;
     };
 
-    const pageNum = Math.max(parseInt(page || '1', 10), 1);
-    const limitNum = Math.max(parseInt(limit || '20', 10), 1);
+    const { page, limit, skip } = getPagination(req.query);
 
     const filter: any = {};
-    if (status && ['ACTIVE', 'COMPLETED', 'DEFAULTED'].includes(status)) {
-      filter.status = status;
-    }
-    if (userId && mongoose.isValidObjectId(userId)) {
-      filter.userId = userId;
-    }
+    if (status) filter.status = status;
+    if (userId) filter.userId = userId;
 
-    const totalCount = await Loan.countDocuments(filter);
-
-    const loans = await Loan.find(filter)
-      .populate('userId', 'fullName email')
-      .sort({ createdAt: -1 })
-      .skip((pageNum - 1) * limitNum)
-      .limit(limitNum)
-      .lean();
-
-    const responseLoans = loans.map((loan: any) => ({
-      id: loan._id.toString(),
-      user: {
-        id: loan.userId?._id?.toString(),
-        fullName: loan.userId?.fullName,
-        email: loan.userId?.email,
-      },
-      principalAmount: loan.principalAmount,
-      interestRate: loan.interestRate,
-      tenureMonths: loan.tenureMonths,
-      monthlyInstallment: loan.monthlyInstallment,
-      outstandingBalance: loan.outstandingBalance,
-      totalRepaid: loan.totalRepaid,
-      status: loan.status,
-      startDate: loan.startDate,
-      endDate: loan.endDate,
-      createdAt: loan.createdAt,
-    }));
+    const [loans, totalCount] = await Promise.all([
+      Loan.find(filter)
+        .populate('userId')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      Loan.countDocuments(filter),
+    ]);
 
     return res.json({
       success: true,
       data: {
-        loans: responseLoans,
+        loans: loans.map((loan) => {
+          const userDoc = loan.userId as any;
+          return {
+            id: loan._id.toString(),
+            user: {
+              id: userDoc?._id?.toString(),
+              fullName: userDoc?.fullName,
+              email: userDoc?.email,
+            },
+            principalAmount: loan.principalAmount,
+            interestRate: loan.interestRate,
+            tenureMonths: loan.tenureMonths,
+            monthlyInstallment: loan.monthlyInstallment,
+            outstandingBalance: loan.outstandingBalance,
+            totalRepaid: loan.totalRepaid,
+            status: loan.status,
+            startDate: loan.startDate.toISOString(),
+            endDate: loan.endDate?.toISOString(),
+            createdAt: loan.createdAt.toISOString(),
+          };
+        }),
         pagination: {
-          currentPage: pageNum,
-          totalPages: Math.ceil(totalCount / limitNum),
+          currentPage: page,
+          totalPages: Math.ceil(totalCount / limit),
           totalCount,
         },
       },
     });
-  } catch (error: any) {
-    console.error('Error in getLoans:', error);
+  } catch (err) {
+    console.error('getLoans error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch loans',
+      message: 'Server error',
     });
   }
 };
 
 /**
  * GET /api/admin/installments
- * Query: ?status=&userId=&loanId=&page=&limit=
+ * Query: ?status=OVERDUE&userId=xxx&loanId=xxx&page=1&limit=50
  */
-export const getAllInstallments = async (req: AuthRequest, res: Response) => {
+export const getAllInstallments = async (req: Request, res: Response) => {
   try {
-    const {
-      status,
-      userId,
-      loanId,
-      page = '1',
-      limit = '50',
-    } = req.query as {
-      status?: string;
+    const { status, userId, loanId } = req.query as {
+      status?: 'PENDING' | 'PAID' | 'OVERDUE' | 'DEFAULTED';
       userId?: string;
       loanId?: string;
-      page?: string;
-      limit?: string;
     };
 
-    const pageNum = Math.max(parseInt(page || '1', 10), 1);
-    const limitNum = Math.max(parseInt(limit || '50', 10), 1);
+    const { page, limit, skip } = getPagination(req.query);
 
     const filter: any = {};
-    if (status && ['PENDING', 'PAID', 'OVERDUE', 'DEFAULTED'].includes(status)) {
-      filter.status = status;
-    }
-    if (loanId && mongoose.isValidObjectId(loanId)) {
-      filter.loanId = loanId;
-    }
+    if (status) filter.status = status;
+    if (userId) filter.userId = userId;
+    if (loanId) filter.loanId = loanId;
 
-    // We need user filter via loan -> user
-    let loanIdsFilter: mongoose.Types.ObjectId[] | undefined;
-    if (userId && mongoose.isValidObjectId(userId)) {
-      const userLoans = await Loan.find({ userId }).select('_id').lean();
-      loanIdsFilter = userLoans.map((l) => l._id);
-      filter.loanId = { $in: loanIdsFilter };
-    }
-
-    const totalCount = await Installment.countDocuments(filter);
-
-    const installments = await Installment.find(filter)
-      .sort({ dueDate: -1 })
-      .skip((pageNum - 1) * limitNum)
-      .limit(limitNum)
-      .populate({
-        path: 'loanId',
-        select: 'principalAmount userId',
-        populate: {
-          path: 'userId',
-          select: 'fullName email phone',
-        },
-      })
-      .lean();
-
-    const responseInstallments = installments.map((inst: any) => {
-      const loan = inst.loanId;
-      const user = loan?.userId;
-      const dueDate = new Date(inst.dueDate);
-      const now = new Date();
-      const daysOverdue =
-        inst.status === 'PENDING' || inst.status === 'OVERDUE' || inst.status === 'DEFAULTED'
-          ? Math.max(0, Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)))
-          : 0;
-
-      return {
-        id: inst._id.toString(),
-        loan: loan
-          ? {
-              id: loan._id.toString(),
-              principalAmount: loan.principalAmount,
-            }
-          : null,
-        user: user
-          ? {
-              id: user._id.toString(),
-              fullName: user.fullName,
-              email: user.email,
-              phone: user.phone,
-            }
-          : null,
-        installmentNumber: inst.installmentNumber,
-        amount: inst.amount,
-        fineAmount: inst.fineAmount,
-        totalDue: (inst.amount || 0) + (inst.fineAmount || 0),
-        dueDate: inst.dueDate,
-        paidDate: inst.paidDate,
-        status: inst.status,
-        daysOverdue,
-      };
-    });
+    const [installments, totalCount] = await Promise.all([
+      Installment.find(filter)
+        .populate('loanId')
+        .populate('userId')
+        .sort({ dueDate: 1 })
+        .skip(skip)
+        .limit(limit),
+      Installment.countDocuments(filter),
+    ]);
 
     return res.json({
       success: true,
       data: {
-        installments: responseInstallments,
+        installments: installments.map((inst) => {
+          const loanDoc = inst.loanId as any;
+          const userDoc = inst.userId as any;
+          return {
+            id: inst._id.toString(),
+            loan: {
+              id: loanDoc?._id?.toString(),
+              principalAmount: loanDoc?.principalAmount,
+            },
+            user: {
+              id: userDoc?._id?.toString(),
+              fullName: userDoc?.fullName,
+              email: userDoc?.email,
+              phone: userDoc?.phone,
+            },
+            installmentNumber: inst.installmentNumber,
+            amount: inst.amount,
+            fineAmount: inst.fineAmount,
+            totalDue: inst.totalDue,
+            dueDate: inst.dueDate.toISOString(),
+            paidDate: inst.paidDate ? inst.paidDate.toISOString() : undefined,
+            status: inst.status,
+            daysOverdue: inst.daysOverdue,
+          };
+        }),
         pagination: {
-          currentPage: pageNum,
-          totalPages: Math.ceil(totalCount / limitNum),
+          currentPage: page,
+          totalPages: Math.ceil(totalCount / limit),
           totalCount,
         },
       },
     });
-  } catch (error: any) {
-    console.error('Error in getAllInstallments:', error);
+  } catch (err) {
+    console.error('getAllInstallments error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch installments',
+      message: 'Server error',
     });
   }
 };
 
 /**
  * GET /api/admin/defaults
- * Get all defaulted loans with AI insights
+ * Get all defaulted loans with AI insights (simplified)
  */
-export const getDefaults = async (req: AuthRequest, res: Response) => {
+export const getDefaults = async (req: Request, res: Response) => {
   try {
-    const defaultedLoans = await Loan.find({ status: LoanStatus.DEFAULTED })
-      .populate('userId', 'fullName email phone')
-      .lean();
+    const defaultedLoans = await Loan.find({
+      status: LoanStatus.DEFAULTED,
+    }).populate('userId');
 
-    const userIds = defaultedLoans.map((l) => l.userId?._id).filter(Boolean);
+    // Also load risk profiles for these users so we can include riskLevel
+    const userIds = defaultedLoans.map((l) => (l.userId as any)._id);
     const riskProfiles = await RiskProfile.find({
       userId: { $in: userIds },
-    }).lean();
+    });
+    const riskByUserId = new Map(
+      riskProfiles.map((rp) => [rp.userId.toString(), rp.riskLevel])
+    );
 
-    const riskMap = new Map<string, IRiskProfile>();
-    riskProfiles.forEach((rp) => riskMap.set(rp.userId.toString(), rp as unknown as IRiskProfile));
+    const data = defaultedLoans.map((loan) => {
+      const userDoc = loan.userId as any;
+      const daysInDefault = loan.defaultedAt
+        ? Math.floor(
+            (Date.now() - loan.defaultedAt.getTime()) /
+              (1000 * 60 * 60 * 24),
+          )
+        : 0;
 
-    const now = new Date();
-
-    const defaultedLoansResponse = defaultedLoans.map((loan: any) => {
-      const user = loan.userId;
-      const rp = riskMap.get(user?._id?.toString());
-      const defaultedAt = loan.defaultedAt ? new Date(loan.defaultedAt) : now;
-      const daysInDefault = Math.max(
-        0,
-        Math.floor((now.getTime() - defaultedAt.getTime()) / (1000 * 60 * 60 * 24))
-      );
-
-      // Simple heuristic for aiPredictedDefault: if defaultProbability > 0.5
-      const aiPredictedDefault = !!rp && (rp.defaultProbability || 0) > 0.5;
+      const userIdStr = userDoc?._id?.toString();
+      const riskLevel = userIdStr
+        ? riskByUserId.get(userIdStr) || 'UNKNOWN'
+        : 'UNKNOWN';
 
       return {
         id: loan._id.toString(),
-        user: user
-          ? {
-              id: user._id.toString(),
-              fullName: user.fullName,
-              email: user.email,
-              phone: user.phone,
-              riskLevel: rp?.riskLevel || RiskLevel.MEDIUM,
-            }
-          : null,
+        user: {
+          id: userIdStr,
+          fullName: userDoc?.fullName,
+          email: userDoc?.email,
+          phone: userDoc?.phone,
+          riskLevel,
+        },
         principalAmount: loan.principalAmount,
         outstandingBalance: loan.outstandingBalance,
         totalFines: loan.totalFines,
-        defaultedAt: loan.defaultedAt,
+        defaultedAt: loan.defaultedAt?.toISOString(),
         daysInDefault,
-        missedInstallments: 0, // could be derived from installments history if needed
-        aiPredictedDefault,
-        recoveryProbability: rp?.defaultProbability
-          ? 1 - rp.defaultProbability
-          : undefined,
+        missedInstallments: 0,         // placeholder, can compute from Installment
+        aiPredictedDefault: false,     // placeholder, can integrate with predictDefaultRisk
+        recoveryProbability: undefined,
       };
     });
 
     const summary = {
-      totalDefaulted: defaultedLoansResponse.length,
-      totalOutstanding: defaultedLoansResponse.reduce(
+      totalDefaulted: data.length,
+      totalOutstanding: data.reduce(
         (sum, l) => sum + (l.outstandingBalance || 0),
-        0
+        0,
       ),
       averageDefaultTime:
-        defaultedLoansResponse.length > 0
-          ? defaultedLoansResponse.reduce((sum, l) => sum + l.daysInDefault, 0) /
-            defaultedLoansResponse.length
+        data.length > 0
+          ? data.reduce((sum, l) => sum + (l.daysInDefault || 0), 0) /
+            data.length
           : 0,
     };
 
     return res.json({
       success: true,
       data: {
-        defaultedLoans: defaultedLoansResponse,
+        defaultedLoans: data,
         summary,
       },
     });
-  } catch (error: any) {
-    console.error('Error in getDefaults:', error);
+  } catch (err) {
+    console.error('getDefaults error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch defaulted loans',
+      message: 'Server error',
     });
   }
 };
@@ -775,142 +727,129 @@ export const getDefaults = async (req: AuthRequest, res: Response) => {
 /**
  * GET /api/admin/dashboard/stats
  */
-export const getDashboardStats = async (req: AuthRequest, res: Response) => {
+export const getDashboardStats = async (req: Request, res: Response) => {
   try {
-    const [usersCounts, loansAgg, installmentsAgg, risksAgg, recentLoans] = await Promise.all([
-      // User stats
+    const [
+      userCounts,
+      loanCounts,
+      installmentCounts,
+      riskCounts,
+      recentPayments,
+    ] = await Promise.all([
+      // Users
       (async () => {
-        const total = await User.countDocuments({ role: UserRole.USER });
-        const pending = await User.countDocuments({
-          role: UserRole.USER,
-          status: UserStatus.PENDING,
-        });
-        const approved = await User.countDocuments({
-          role: UserRole.USER,
-          status: UserStatus.APPROVED,
-        });
-        const rejected = await User.countDocuments({
-          role: UserRole.USER,
-          status: UserStatus.REJECTED,
-        });
+        const [total, pending, approved, rejected] = await Promise.all([
+          User.countDocuments(),
+          User.countDocuments({ status: UserStatus.PENDING }),
+          User.countDocuments({ status: UserStatus.APPROVED }),
+          User.countDocuments({ status: UserStatus.REJECTED }),
+        ]);
         return { total, pending, approved, rejected };
       })(),
 
-      // Loan aggregates
+      // Loans
       (async () => {
-        const loans = await Loan.aggregate([
-          {
-            $group: {
-              _id: '$status',
-              count: { $sum: 1 },
-              totalDisbursed: { $sum: '$principalAmount' },
-              totalCollected: { $sum: '$totalRepaid' },
-              totalOutstanding: { $sum: '$outstandingBalance' },
+        const [total, active, completed, defaulted, sums] = await Promise.all([
+          Loan.countDocuments(),
+          Loan.countDocuments({ status: LoanStatus.ACTIVE }),
+          Loan.countDocuments({ status: LoanStatus.COMPLETED }),
+          Loan.countDocuments({ status: LoanStatus.DEFAULTED }),
+          Loan.aggregate([
+            {
+              $group: {
+                _id: null,
+                totalDisbursed: { $sum: '$principalAmount' },
+                totalCollected: { $sum: '$totalRepaid' },
+                totalOutstanding: { $sum: '$outstandingBalance' },
+              },
             },
-          },
+          ]),
         ]);
-        const base = {
-          total: 0,
-          active: 0,
-          completed: 0,
-          defaulted: 0,
+
+        const sumsDoc = sums[0] || {
           totalDisbursed: 0,
           totalCollected: 0,
           totalOutstanding: 0,
         };
-        loans.forEach((l) => {
-          base.total += l.count;
-          if (l._id === LoanStatus.ACTIVE) base.active = l.count;
-          if (l._id === LoanStatus.COMPLETED) base.completed = l.count;
-          if (l._id === LoanStatus.DEFAULTED) base.defaulted = l.count;
-          base.totalDisbursed += l.totalDisbursed || 0;
-          base.totalCollected += l.totalCollected || 0;
-          base.totalOutstanding += l.totalOutstanding || 0;
-        });
-        return base;
+
+        return {
+          total,
+          active,
+          completed,
+          defaulted,
+          totalDisbursed: sumsDoc.totalDisbursed,
+          totalCollected: sumsDoc.totalCollected,
+          totalOutstanding: sumsDoc.totalOutstanding,
+        };
       })(),
 
-      // Installments aggregates (basic)
+      // Installments
       (async () => {
-        const now = new Date();
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-        const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-
-        const pending = await Installment.countDocuments({ status: 'PENDING' });
-        const overdue = await Installment.countDocuments({ status: 'OVERDUE' });
-        const def = await Installment.countDocuments({ status: 'DEFAULTED' });
-
-        const dueThisMonth = await Installment.countDocuments({
-          dueDate: { $gte: startOfMonth, $lte: endOfMonth },
-        });
-
-        const agg = await Installment.aggregate([
-          {
-            $match: {
-              dueDate: { $gte: startOfMonth, $lte: endOfMonth },
-            },
-          },
-          {
-            $group: {
-              _id: null,
-              expectedCollection: {
-                $sum: {
-                  $add: ['$amount', '$fineAmount'],
+        const [pending, overdue, defaulted, dueThisMonthAgg] = await Promise.all(
+          [
+            Installment.countDocuments({ status: InstallmentStatus.PENDING }),
+            Installment.countDocuments({ status: InstallmentStatus.OVERDUE }),
+            Installment.countDocuments({ status: InstallmentStatus.DEFAULTED }),
+            Installment.aggregate([
+              {
+                $match: {
+                  status: InstallmentStatus.PENDING,
                 },
               },
-            },
-          },
-        ]);
+              {
+                $group: {
+                  _id: null,
+                  dueThisMonth: { $sum: 1 },
+                  expectedCollection: { $sum: '$totalDue' },
+                },
+              },
+            ]),
+          ]
+        );
+
+        const dueThisMonthDoc = dueThisMonthAgg[0] || {
+          dueThisMonth: 0,
+          expectedCollection: 0,
+        };
 
         return {
           pending,
           overdue,
-          defaulted: def,
-          dueThisMonth,
-          expectedCollection: agg[0]?.expectedCollection || 0,
+          defaulted,
+          dueThisMonth: dueThisMonthDoc.dueThisMonth,
+          expectedCollection: dueThisMonthDoc.expectedCollection,
         };
       })(),
 
-      // Risk distribution
+      // Risk
       (async () => {
-        const aggregation = await RiskProfile.aggregate([
-          {
-            $group: {
-              _id: '$riskLevel',
-              count: { $sum: 1 },
-              aiPredictedDefaults: {
-                $sum: {
-                  $cond: [{ $gt: ['$defaultProbability', 0.5] }, 1, 0],
-                },
-              },
-            },
-          },
+        const [lowRisk, mediumRisk, highRisk] = await Promise.all([
+          RiskProfile.countDocuments({ riskLevel: 'LOW' }),
+          RiskProfile.countDocuments({ riskLevel: 'MEDIUM' }),
+          RiskProfile.countDocuments({ riskLevel: 'HIGH' }),
         ]);
-        const base = {
-          lowRisk: 0,
-          mediumRisk: 0,
-          highRisk: 0,
-          aiPredictedDefaults: 0,
+
+        // If later you store aiPredictedDefault flags, you can count them here.
+        const aiPredictedDefaults = 0;
+
+        return {
+          lowRisk,
+          mediumRisk,
+          highRisk,
+          aiPredictedDefaults,
         };
-        aggregation.forEach((r) => {
-          if (r._id === RiskLevel.LOW) base.lowRisk = r.count;
-          if (r._id === RiskLevel.MEDIUM) base.mediumRisk = r.count;
-          if (r._id === RiskLevel.HIGH) base.highRisk = r.count;
-          base.aiPredictedDefaults += r.aiPredictedDefaults || 0;
-        });
-        return base;
       })(),
 
-      // Recent activity: just some last 10 loans for now
+      // Recent activity (simplified: recent payment transactions)
       (async () => {
-        const loans = await Loan.find()
+        const payments = await PaymentTransaction.find()
           .sort({ createdAt: -1 })
-          .limit(10)
-          .lean();
-        return loans.map((loan) => ({
-          type: 'LOAN_CREATED',
-          description: `Loan of PKR ${loan.principalAmount} created for user ${loan.userId}`,
-          timestamp: loan.createdAt,
+          .limit(10);
+
+        return payments.map((p) => ({
+          type: 'PAYMENT',
+          description: `Payment ${p.status} for installment ${p.installmentId}`,
+          timestamp: p.createdAt.toISOString(),
         }));
       })(),
     ]);
@@ -918,18 +857,18 @@ export const getDashboardStats = async (req: AuthRequest, res: Response) => {
     return res.json({
       success: true,
       data: {
-        users: usersCounts,
-        loans: loansAgg,
-        installments: installmentsAgg,
-        risk: risksAgg,
-        recentActivity: recentLoans,
+        users: userCounts,
+        loans: loanCounts,
+        installments: installmentCounts,
+        risk: riskCounts,
+        recentActivity: recentPayments,
       },
     });
-  } catch (error: any) {
-    console.error('Error in getDashboardStats:', error);
+  } catch (err) {
+    console.error('getDashboardStats error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch dashboard stats',
+      message: 'Server error',
     });
   }
 };
@@ -937,15 +876,15 @@ export const getDashboardStats = async (req: AuthRequest, res: Response) => {
 /**
  * POST /api/admin/waive-fine/:installmentId
  */
-export const waiveFine = async (req: AuthRequest, res: Response) => {
+export const waiveFine = async (req: Request, res: Response) => {
   try {
     const { installmentId } = req.params;
-    const { reason } = req.body as { reason?: string };
+    const { reason } = req.body as { reason: string };
 
-    if (!reason || !reason.trim()) {
+    if (!reason) {
       return res.status(400).json({
         success: false,
-        message: 'Reason is required to waive fine',
+        message: 'Reason is required',
       });
     }
 
@@ -957,10 +896,12 @@ export const waiveFine = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const oldFineAmount = installment.fineAmount || 0;
+    const oldFineAmount = installment.fineAmount;
     installment.fineAmount = 0;
-
+    installment.totalDue = installment.amount;
     await installment.save();
+
+    const waivedBy = req.user?.id || 'SYSTEM';
 
     return res.json({
       success: true,
@@ -968,16 +909,16 @@ export const waiveFine = async (req: AuthRequest, res: Response) => {
       data: {
         installmentId: installment._id.toString(),
         oldFineAmount,
-        newFineAmount: 0,
-        waivedBy: req.user?.id || '',
+        newFineAmount: installment.fineAmount,
+        waivedBy,
         reason,
       },
     });
-  } catch (error: any) {
-    console.error('Error in waiveFine:', error);
+  } catch (err) {
+    console.error('waiveFine error:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to waive fine',
+      message: 'Server error',
     });
   }
 };

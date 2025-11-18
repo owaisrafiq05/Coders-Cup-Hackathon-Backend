@@ -25,6 +25,7 @@ interface CalculateRiskScoreOptions {
   forceRecalculate?: boolean;
   // From admin.controller.ts (for compatibility):
   recalculate?: boolean;
+  triggerSource?: string;
 }
 
 class RiskScoringEngine {
