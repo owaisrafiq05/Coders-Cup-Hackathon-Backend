@@ -30,7 +30,8 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.20.0",
     "nodemailer": "^7.0.10",
-    "nodemon": "^3.1.11"
+    "nodemon": "^3.1.11",
+    "stripe": "^19.3.1"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
@@ -39,6 +40,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/mongoose": "^5.11.96",
     "@types/node": "^24.10.1",
+    "@types/stripe": "^8.0.416",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }

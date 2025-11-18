@@ -21,6 +21,10 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Middleware (Express 5 compatible)
+// Webhook endpoint needs raw body for signature verification
+app.use('/api/payments/webhook', bodyParser.raw({ type: 'application/json' }));
+
+// Regular JSON parsing for other routes
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cors());
