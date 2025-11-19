@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "lib": ["ES2022"],
+    "moduleResolution": "node",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "./dist",
+    "rootDir": "./",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "types": ["node", "mocha", "chai"],
+    "typeRoots": ["./node_modules/@types", "./target/types"]
+  },
+  "include": [
+    "programs/**/*",
+    "tests/**/*",
+    "scripts/**/*",
+    "sdk/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "target",
+    "dist"
+  ]
+}
