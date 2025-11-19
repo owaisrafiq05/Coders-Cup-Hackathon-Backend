@@ -120,7 +120,7 @@ if (isVercel) {
 }
 
 // Routes - mount at root for Vercel (Vercel routes /api/* to this function)
-app.use('/', mainRouter);
+app.use('/api', mainRouter);
 
 // Simple health route
 app.get('/', (req, res) => {
