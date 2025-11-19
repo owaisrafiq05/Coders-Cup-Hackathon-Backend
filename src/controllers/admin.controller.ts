@@ -431,7 +431,7 @@ export const createLoanForUser = async (req: Request, res: Response) => {
         installmentDocs.push({
           loanId: loan._id,
           userId,
-          installmentNumber: i,         // NEW REQUIRED FIELD haha
+          installmentNumber: i,         // NEW REQUIRED FIELD hahaha
           amount: roundedEMI,
           totalDue: roundedEMI,         // NEW REQUIRED FIELD
           dueDate: due,
