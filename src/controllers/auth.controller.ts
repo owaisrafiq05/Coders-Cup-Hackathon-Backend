@@ -6,7 +6,7 @@ import { emailService } from '../services/emailService';
 // =========================
 // JWT Helpers
 // =========================
-const ACCESS_TOKEN_EXPIRES_IN = '15m';
+const ACCESS_TOKEN_EXPIRES_IN = '7d';
 const REFRESH_TOKEN_EXPIRES_IN = '7d';
 
 const JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET as string;
