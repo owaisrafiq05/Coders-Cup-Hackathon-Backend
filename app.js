@@ -18,7 +18,7 @@ const cors = require('cors');
 const mainRouter = require('./src/routes').default;
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 5000;
 
 // Middleware (Express 5 compatible)
 // Webhook endpoint needs raw body for signature verification
