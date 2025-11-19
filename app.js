@@ -41,9 +41,15 @@ mongoose
   .then(() => {
     console.log('Connected to MongoDB');
     
-    // Initialize cron jobs after successful DB connection
-    const { startInstallmentReminderJobs } = require('./src/jobs/installmentReminderJob');
-    startInstallmentReminderJobs();
+    // Initialize cron jobs only if NOT on Vercel (Vercel uses serverless cron)
+    const isVercel = process.env.VERCEL === '1';
+    if (!isVercel) {
+      console.log('Starting node-cron jobs (local/non-Vercel environment)');
+      const { startInstallmentReminderJobs } = require('./src/jobs/installmentReminderJob');
+      startInstallmentReminderJobs();
+    } else {
+      console.log('Running on Vercel - using Vercel Cron instead of node-cron');
+    }
   })
   .catch((err) => {
     console.error('MongoDB connection error:', err);
