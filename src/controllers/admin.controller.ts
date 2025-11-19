@@ -916,6 +916,8 @@ export const getDashboardStats = async (req: Request, res: Response) => {
       installmentCounts,
       riskCounts,
       recentPayments,
+      pendingUsers,
+      recentLoans,
     ] = await Promise.all([
       // Users
       (async () => {
@@ -1033,6 +1035,49 @@ export const getDashboardStats = async (req: Request, res: Response) => {
           timestamp: p.createdAt.toISOString(),
         }));
       })(),
+      
+      // Pending users (last 5)
+      (async () => {
+        const pendingUsers = await User.find({ status: UserStatus.PENDING })
+          .sort({ createdAt: -1 })
+          .limit(5)
+          .lean();
+
+        return pendingUsers.map((u) => ({
+          id: u._id,
+          fullName: u.fullName,
+          email: u.email,
+          phone: u.phone,
+          city: u.city,
+          monthlyIncome: u.monthlyIncome,
+          createdAt: u.createdAt,
+        }));
+      })(),
+      
+      // Recent loans (last 5)
+      (async () => {
+        const recentLoans = await Loan.find()
+          .sort({ createdAt: -1 })
+          .limit(5)
+          .populate('userId', 'fullName email')
+          .lean();
+
+        return recentLoans.map((loan: any) => ({
+          id: loan._id,
+          principalAmount: loan.principalAmount,
+          interestRate: loan.interestRate,
+          tenureMonths: loan.tenureMonths,
+          status: loan.status,
+          outstandingBalance: loan.outstandingBalance,
+          totalRepaid: loan.totalRepaid,
+          createdAt: loan.createdAt,
+          user: {
+            id: loan.userId._id,
+            fullName: loan.userId.fullName,
+            email: loan.userId.email,
+          },
+        }));
+      })(),
     ]);
 
     return res.json({
@@ -1043,6 +1088,8 @@ export const getDashboardStats = async (req: Request, res: Response) => {
         installments: installmentCounts,
         risk: riskCounts,
         recentActivity: recentPayments,
+        pendingUsers,
+        recentLoans,
       },
     });
   } catch (err) {
