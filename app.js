@@ -32,16 +32,25 @@ const mainRouter = routesModule.default || routesModule;
 const app = express();
 const port = process.env.PORT || 5000;
 
-// CORS must be first - before any other middleware
-// Allow all origins, methods, and headers
-app.use(cors({
-  origin: true, // Reflects the request origin
-  credentials: true,
-  methods: '*', // Allow all methods
-  allowedHeaders: '*', // Allow all headers
-  exposedHeaders: '*', // Expose all headers
-  optionsSuccessStatus: 200
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      const allowedOrigins = (process.env.ALLOWED_ORIGINS || '*')
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+
+      if (allowedOrigins.includes('*') || !origin) {
+        callback(null, true);
+      } else if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true,
+  })
+);
 
 // Middleware (Express 5 compatible)
 // Webhook endpoint needs raw body for signature verification
