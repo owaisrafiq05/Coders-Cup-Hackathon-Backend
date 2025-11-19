@@ -11,6 +11,14 @@ import LoanRequest, { LoanRequestStatus } from '../models/LoanRequest';
 import { riskScoringEngine } from '../ai/riskScoringEngine';
 import logger from '../utils/logger';
 import { emailService } from '../services/emailService';
+import { paymentService } from '../services/paymentService';
+import Stripe from 'stripe';
+
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY, {
+      apiVersion: '2025-10-29.clover',
+    })
+  : null;
 
 // --------------------
 // Helpers
@@ -1128,11 +1136,20 @@ export const getLoanRequests = async (req: Request, res: Response) => {
       LoanRequest.countDocuments(filter),
     ]);
 
+    // Fetch risk profiles for all users in parallel
+    const userIds = loanRequests.map((req) => (req.userId as any)?._id).filter(Boolean);
+    const riskProfiles = await RiskProfile.find({ userId: { $in: userIds } });
+    const riskProfileMap = new Map(
+      riskProfiles.map((rp) => [rp.userId.toString(), rp])
+    );
+
     return res.json({
       success: true,
       data: {
         loanRequests: loanRequests.map((request) => {
           const userDoc = request.userId as any;
+          const riskProfile = riskProfileMap.get(userDoc?._id?.toString());
+          
           return {
             id: request._id.toString(),
             user: {
@@ -1150,6 +1167,16 @@ export const getLoanRequests = async (req: Request, res: Response) => {
             rejectedAt: request.rejectedAt?.toISOString(),
             loanId: request.loanId?.toString(),
             createdAt: request.createdAt.toISOString(),
+            // User financial info
+            monthlyIncome: userDoc?.monthlyIncome,
+            employmentType: userDoc?.employmentType,
+            // Risk profile data
+            riskLevel: riskProfile?.riskLevel,
+            riskScore: riskProfile?.riskScore,
+            recommendedMaxLoan: riskProfile?.recommendedMaxLoan,
+            recommendedTenure: riskProfile?.recommendedTenure,
+            defaultProbability: riskProfile?.defaultProbability,
+            riskReasons: riskProfile?.riskReasons || [],
           };
         }),
         pagination: {
@@ -1938,6 +1965,133 @@ export const getUserById = async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       message: 'Server error',
+    });
+  }
+};
+
+/**
+ * POST /api/admin/installments/:installmentId/send-payment-link
+ * Send payment link to user for a specific installment
+ */
+export const sendPaymentLink = async (req: Request, res: Response) => {
+  try {
+    const { installmentId } = req.params;
+
+    // Find the installment with populated user data
+    const installment = await Installment.findById(installmentId).populate('userId');
+    if (!installment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Installment not found',
+      });
+    }
+
+    const user = installment.userId as any;
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found for this installment',
+      });
+    }
+
+    // Check if installment is already paid
+    if (installment.status === InstallmentStatus.PAID) {
+      return res.status(400).json({
+        success: false,
+        message: 'This installment has already been paid',
+      });
+    }
+
+    // Calculate days until due
+    const now = new Date();
+    const daysUntilDue = Math.ceil((installment.dueDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+    // Generate or retrieve payment URL
+    let paymentUrl: string;
+    
+    // If there's an existing Stripe session, try to get the actual Stripe URL
+    if (installment.stripeSessionId && stripe) {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(installment.stripeSessionId);
+        // Check if session is still valid (not expired)
+        const sessionExpired = session.expires_at && session.expires_at * 1000 < Date.now();
+        
+        if (!sessionExpired && session.url) {
+          paymentUrl = session.url;
+        } else {
+          // Session expired, create a new one
+          const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+          const newSession = await paymentService.createPaymentSession({
+            installmentId: installment._id.toString(),
+            userId: user._id.toString(),
+            successUrl: `${frontendUrl}/dashboard/installments/success`,
+            cancelUrl: `${frontendUrl}/dashboard/installments/${installment._id}`,
+          });
+          paymentUrl = newSession.sessionUrl;
+        }
+      } catch (error) {
+        logger.error('Failed to retrieve Stripe session, creating new one', { error });
+        // Create new session if retrieval fails
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const newSession = await paymentService.createPaymentSession({
+          installmentId: installment._id.toString(),
+          userId: user._id.toString(),
+          successUrl: `${frontendUrl}/dashboard/installments/success`,
+          cancelUrl: `${frontendUrl}/dashboard/installments/${installment._id}`,
+        });
+        paymentUrl = newSession.sessionUrl;
+      }
+    } else {
+      // No existing session, create a new Stripe session
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      try {
+        const newSession = await paymentService.createPaymentSession({
+          installmentId: installment._id.toString(),
+          userId: user._id.toString(),
+          successUrl: `${frontendUrl}/dashboard/installments/success`,
+          cancelUrl: `${frontendUrl}/dashboard/installments/${installment._id}`,
+        });
+        paymentUrl = newSession.sessionUrl;
+      } catch (error) {
+        logger.error('Failed to create Stripe session, using fallback URL', { error });
+        // Fallback to dashboard URL if Stripe fails
+        paymentUrl = `${frontendUrl}/dashboard/installments/${installment._id}`;
+      }
+    }
+
+    // Send email with payment link
+    await emailService.sendInstallmentReminder(user.email, {
+      userName: user.fullName,
+      installmentNumber: installment.installmentNumber,
+      amount: installment.totalDue,
+      dueDate: installment.dueDate.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      }),
+      daysUntilDue: Math.max(daysUntilDue, 0),
+      paymentUrl,
+    }, user._id.toString());
+
+    // Update reminder count and last sent date
+    installment.remindersSent += 1;
+    installment.lastReminderSent = new Date();
+    await installment.save();
+
+    return res.json({
+      success: true,
+      message: 'Payment link sent successfully',
+      data: {
+        installmentId: installment._id,
+        userEmail: user.email,
+        remindersSent: installment.remindersSent,
+      },
+    });
+  } catch (err) {
+    console.error('sendPaymentLink error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to send payment link',
     });
   }
 };

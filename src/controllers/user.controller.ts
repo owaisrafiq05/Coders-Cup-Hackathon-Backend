@@ -8,6 +8,7 @@ import Installment, { InstallmentStatus } from '../models/Installment';
 import RiskProfile from '../models/RiskProfile';
 import LoanRequest, { LoanRequestStatus } from '../models/LoanRequest';
 import { emailService } from '../services/emailService';
+import { riskScoringEngine } from '../ai/riskScoringEngine';
 
 interface JwtPayload {
   userId: string;
@@ -490,6 +491,20 @@ export const requestLoan = async (req: Request, res: Response) => {
       });
     }
 
+    // Calculate/update risk profile with requested loan details
+    let riskProfile;
+    try {
+      riskProfile = await riskScoringEngine.calculateRiskScore(authUser.userId, {
+        requestedAmount,
+        requestedTenure,
+        forceRecalculate: true,
+      });
+      console.log('Risk profile calculated for loan request:', riskProfile.riskLevel);
+    } catch (riskError) {
+      console.error('Failed to calculate risk profile for loan request:', riskError);
+      // Continue with loan request even if risk calculation fails
+    }
+
     // Create loan request
     const loanRequest = new LoanRequest({
       userId: authUser.userId,
@@ -527,6 +542,14 @@ export const requestLoan = async (req: Request, res: Response) => {
         requestedTenure,
         status: loanRequest.status,
         createdAt: loanRequest.createdAt.toISOString(),
+        // Include risk profile information if available
+        riskProfile: riskProfile ? {
+          riskLevel: riskProfile.riskLevel,
+          riskScore: riskProfile.riskScore,
+          recommendedMaxLoan: riskProfile.recommendedMaxLoan,
+          recommendedTenure: riskProfile.recommendedTenure,
+          riskReasons: riskProfile.riskReasons,
+        } : undefined,
       },
     });
   } catch (error) {

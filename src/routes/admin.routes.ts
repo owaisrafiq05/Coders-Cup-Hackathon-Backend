@@ -21,6 +21,7 @@ import {
   triggerInstallmentReminders,
   triggerOverdueNotices,
   getAnalytics,
+  sendPaymentLink,
 } from '../controllers/admin.controller';
 
 // Adjust these imports to match your actual middleware filenames/exports
@@ -102,6 +103,12 @@ router.get('/dashboard/stats', getDashboardStats);
  * POST /api/admin/waive-fine/:installmentId
  */
 router.post('/waive-fine/:installmentId', waiveFine);
+
+/**
+ * POST /api/admin/installments/:installmentId/send-payment-link
+ * Send payment link to user for a specific installment
+ */
+router.post('/installments/:installmentId/send-payment-link', sendPaymentLink);
 
 /**
  * GET /api/admin/loan-requests
