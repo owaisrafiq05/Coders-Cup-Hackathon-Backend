@@ -5,7 +5,7 @@ require('dotenv').config();
 if (process.env.NODE_ENV !== 'production' && process.env.FORCE_TS_NODE !== '1') {
   try {
     require('ts-node').register({
-      transpileOnly: true, // faster for dev
+      transpileOnly: true, // faster for development
       compilerOptions: {
         module: 'commonjs'
       }
