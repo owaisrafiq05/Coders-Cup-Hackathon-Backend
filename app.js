@@ -39,7 +39,12 @@ app.use('/payments/webhook', bodyParser.raw({ type: 'application/json' }));
 // Regular JSON parsing for other routes
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false
+}));
 
 // MongoDB connection with caching for serverless
 let cachedDb = null;
