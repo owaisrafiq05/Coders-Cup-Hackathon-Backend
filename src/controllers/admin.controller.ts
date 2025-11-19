@@ -2095,3 +2095,175 @@ export const sendPaymentLink = async (req: Request, res: Response) => {
     });
   }
 };
+
+/**
+ * POST /api/admin/send-legal-notice/:loanId
+ * Send legal notice to user for defaulted loan
+ */
+export const sendLegalNotice = async (req: Request, res: Response) => {
+  try {
+    const { loanId } = req.params;
+
+    // Find the loan with populated user data
+    const loan = await Loan.findById(loanId).populate('userId');
+    if (!loan) {
+      return res.status(404).json({
+        success: false,
+        message: 'Loan not found',
+      });
+    }
+
+    const user = loan.userId as any;
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found for this loan',
+      });
+    }
+
+    // Check if loan is defaulted
+    if (loan.status !== LoanStatus.DEFAULTED) {
+      return res.status(400).json({
+        success: false,
+        message: 'Loan is not in defaulted status',
+      });
+    }
+
+    // Get defaulted installments
+    const installments = await Installment.find({
+      loanId: loan._id,
+      status: InstallmentStatus.DEFAULTED,
+    });
+
+    const defaultedCount = installments.length;
+    const totalOverdue = installments.reduce((sum, inst) => sum + inst.totalDue, 0);
+
+    // Send legal notice email
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #dc2626; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }
+          .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 5px 5px; }
+          .warning-box { background: #fef2f2; border: 2px solid #dc2626; padding: 20px; border-radius: 5px; margin: 20px 0; }
+          .details { background: white; padding: 15px; border-radius: 5px; margin: 15px 0; }
+          .amount { font-size: 28px; color: #dc2626; font-weight: bold; text-align: center; margin: 20px 0; }
+          .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
+          .legal-text { font-size: 12px; color: #666; margin-top: 20px; padding: 15px; background: #f3f4f6; border-radius: 5px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>⚠️ LEGAL NOTICE</h1>
+          </div>
+          <div class="content">
+            <p>Dear ${user.fullName},</p>
+            
+            <div class="warning-box">
+              <h2 style="color: #dc2626; margin-top: 0;">FORMAL NOTICE OF LOAN DEFAULT</h2>
+              <p><strong>This is an official legal notice regarding your defaulted loan with Coders Cup Microfinance.</strong></p>
+            </div>
+
+            <div class="details">
+              <h3>Loan Details:</h3>
+              <p><strong>Loan ID:</strong> ${loan._id}</p>
+              <p><strong>Original Principal:</strong> PKR ${loan.principalAmount.toLocaleString()}</p>
+              <p><strong>Defaulted Installments:</strong> ${defaultedCount}</p>
+              <p><strong>Days in Default:</strong> ${installments[0]?.daysOverdue || 0}</p>
+            </div>
+
+            <div class="amount">
+              Total Outstanding: PKR ${loan.outstandingBalance.toLocaleString()}
+            </div>
+
+            <div class="warning-box">
+              <h3 style="margin-top: 0;">IMMEDIATE ACTION REQUIRED</h3>
+              <p>You are hereby notified that your loan account is in default status. This constitutes a serious breach of your loan agreement.</p>
+              
+              <p><strong>Legal Consequences:</strong></p>
+              <ul>
+                <li>Legal proceedings may be initiated against you</li>
+                <li>Your credit score will be severely impacted</li>
+                <li>Asset seizure procedures may be commenced</li>
+                <li>Court judgments may be obtained</li>
+                <li>Additional legal fees and penalties will be applied</li>
+              </ul>
+            </div>
+
+            <p><strong>SETTLEMENT DEADLINE: 7 DAYS FROM RECEIPT OF THIS NOTICE</strong></p>
+
+            <p>To avoid legal action, you must:</p>
+            <ol>
+              <li>Contact our office immediately at the details below</li>
+              <li>Arrange payment of the outstanding amount</li>
+              <li>Provide a written explanation for the default</li>
+            </ol>
+
+            <div class="details">
+              <h3>Contact Information:</h3>
+              <p><strong>Email:</strong> legal@coderscup.com</p>
+              <p><strong>Phone:</strong> +92-XXX-XXXXXXX</p>
+              <p><strong>Office Hours:</strong> Monday-Friday, 9:00 AM - 5:00 PM</p>
+            </div>
+
+            <div class="legal-text">
+              <p><strong>LEGAL DISCLAIMER:</strong></p>
+              <p>This notice is sent in accordance with the applicable laws and regulations governing microfinance operations in Pakistan. Failure to respond to this notice within the specified timeframe will result in immediate legal action without further warning. This communication is from a debt collector and is an attempt to collect a debt. Any information obtained will be used for that purpose.</p>
+            </div>
+
+            <p style="margin-top: 30px;">We strongly urge you to take this matter seriously and contact us immediately to resolve this issue.</p>
+
+            <p>Sincerely,<br>
+            <strong>Legal Department</strong><br>
+            Coders Cup Microfinance</p>
+          </div>
+          <div class="footer">
+            <p>© 2025 Coders Cup Microfinance. All rights reserved.</p>
+            <p>This is an automated legal notice. Please do not reply to this email.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    await emailService.sendEmail({
+      to: user.email,
+      subject: '⚠️ URGENT: Legal Notice - Loan Default',
+      html,
+      userId: user._id.toString(),
+      emailType: 'OTHER' as any,
+      metadata: {
+        loanId: loan._id.toString(),
+        noticeType: 'LEGAL_NOTICE',
+        outstandingAmount: loan.outstandingBalance,
+        defaultedInstallments: defaultedCount,
+      },
+    });
+
+    logger.info('Legal notice sent', {
+      loanId,
+      userId: user._id.toString(),
+      userEmail: user.email,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Legal notice sent successfully',
+      data: {
+        loanId: loan._id,
+        userEmail: user.email,
+        outstandingAmount: loan.outstandingBalance,
+      },
+    });
+  } catch (err) {
+    console.error('sendLegalNotice error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to send legal notice',
+    });
+  }
+};

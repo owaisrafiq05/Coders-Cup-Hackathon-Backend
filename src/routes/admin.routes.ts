@@ -22,6 +22,7 @@ import {
   triggerOverdueNotices,
   getAnalytics,
   sendPaymentLink,
+  sendLegalNotice,
 } from '../controllers/admin.controller';
 
 // Adjust these imports to match your actual middleware filenames/exports
@@ -109,6 +110,12 @@ router.post('/waive-fine/:installmentId', waiveFine);
  * Send payment link to user for a specific installment
  */
 router.post('/installments/:installmentId/send-payment-link', sendPaymentLink);
+
+/**
+ * POST /api/admin/send-legal-notice/:loanId
+ * Send legal notice to user for defaulted loan
+ */
+router.post('/send-legal-notice/:loanId', sendLegalNotice);
 
 /**
  * GET /api/admin/loan-requests
