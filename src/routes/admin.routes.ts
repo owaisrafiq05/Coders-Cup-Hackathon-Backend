@@ -2,11 +2,13 @@
 import { Router } from 'express';
 import {
   getUsers,
+  getUserById,
   approveUser,
   rejectUser,
   triggerRiskScore,
   getRiskProfile,
   createLoanForUser,
+  getLoanById,
   updateLoan,
   getLoans,
   getAllInstallments,
@@ -18,6 +20,7 @@ import {
   rejectLoanRequest,
   triggerInstallmentReminders,
   triggerOverdueNotices,
+  getAnalytics,
 } from '../controllers/admin.controller';
 
 // Adjust these imports to match your actual middleware filenames/exports
@@ -33,6 +36,11 @@ router.use(authMiddleware, requireAdmin);
  * GET /api/admin/users
  */
 router.get('/users', getUsers);
+
+/**
+ * GET /api/admin/users/:userId
+ */
+router.get('/users/:userId', getUserById);
 
 /**
  * PATCH /api/admin/users/:id/approve
@@ -55,6 +63,17 @@ router.post('/risk-score/:userId', triggerRiskScore);
 router.get('/risk-profile/:userId', getRiskProfile);
 
 /**
+ * GET /api/admin/loans
+ */
+router.get('/loans', getLoans);
+
+/**
+ * GET /api/admin/loans/:loanId
+ * Get detailed loan information
+ */
+router.get('/loans/:loanId', getLoanById);
+
+/**
  * POST /api/admin/loans/:userId
  */
 router.post('/loans/:userId', createLoanForUser);
@@ -63,11 +82,6 @@ router.post('/loans/:userId', createLoanForUser);
  * PUT /api/admin/loans/:loanId
  */
 router.put('/loans/:loanId', updateLoan);
-
-/**
- * GET /api/admin/loans
- */
-router.get('/loans', getLoans);
 
 /**
  * GET /api/admin/installments
@@ -115,5 +129,11 @@ router.post('/reminders/installments', triggerInstallmentReminders);
  * Manually trigger overdue notice emails
  */
 router.post('/reminders/overdue', triggerOverdueNotices);
+
+/**
+ * GET /api/admin/analytics
+ * Get comprehensive analytics data
+ */
+router.get('/analytics', getAnalytics);
 
 export default router;

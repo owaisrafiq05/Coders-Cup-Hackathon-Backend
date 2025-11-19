@@ -505,6 +505,136 @@ export const createLoanForUser = async (req: Request, res: Response) => {
     
 
 /**
+ * GET /api/admin/loans/:loanId
+ * Get detailed loan information with installments and risk analysis
+ */
+export const getLoanById = async (req: Request, res: Response) => {
+  try {
+    const { loanId } = req.params;
+
+    const loan = await Loan.findById(loanId).populate('userId');
+    if (!loan) {
+      return res.status(404).json({
+        success: false,
+        message: 'Loan not found',
+      });
+    }
+
+    const userDoc = loan.userId as any;
+
+    // Get all installments for this loan
+    const installments = await Installment.find({ loanId: loan._id }).sort({ installmentNumber: 1 });
+
+    // Calculate installment statistics
+    const totalInstallments = installments.length;
+    const paidInstallments = installments.filter(i => i.status === InstallmentStatus.PAID).length;
+    const pendingInstallments = installments.filter(i => i.status === InstallmentStatus.PENDING).length;
+    const overdueInstallments = installments.filter(i => i.status === InstallmentStatus.OVERDUE).length;
+    const defaultedInstallments = installments.filter(i => i.status === InstallmentStatus.DEFAULTED).length;
+
+    // Get user's risk profile
+    const riskProfile = await RiskProfile.findOne({ userId: loan.userId });
+
+    // Calculate loan-specific risk metrics
+    const paymentHistory = {
+      onTimePayments: installments.filter(i => i.status === InstallmentStatus.PAID && i.daysOverdue === 0).length,
+      latePayments: installments.filter(i => i.status === InstallmentStatus.PAID && i.daysOverdue > 0).length,
+      missedPayments: overdueInstallments + defaultedInstallments,
+    };
+
+    const paymentSuccessRate = totalInstallments > 0 
+      ? ((paidInstallments / totalInstallments) * 100).toFixed(1) 
+      : '0.0';
+
+    // Risk analysis for this specific loan
+    const loanRiskAnalysis = {
+      userRiskProfile: riskProfile ? {
+        riskLevel: riskProfile.riskLevel,
+        riskScore: riskProfile.riskScore,
+        defaultProbability: riskProfile.defaultProbability,
+        lastCalculated: riskProfile.lastCalculated,
+      } : null,
+      loanPerformance: {
+        paymentSuccessRate: parseFloat(paymentSuccessRate),
+        onTimePaymentRate: totalInstallments > 0 
+          ? ((paymentHistory.onTimePayments / totalInstallments) * 100).toFixed(1) 
+          : '0.0',
+        missedPaymentCount: paymentHistory.missedPayments,
+      },
+      loanHealthScore: (() => {
+        let score = 100;
+        // Deduct points for overdue/defaulted installments
+        score -= (overdueInstallments * 10);
+        score -= (defaultedInstallments * 20);
+        // Deduct points based on outstanding balance ratio
+        const outstandingRatio = loan.outstandingBalance / loan.totalAmount;
+        if (outstandingRatio > 0.7) score -= 10;
+        return Math.max(0, Math.min(100, score));
+      })(),
+    };
+
+    return res.json({
+      success: true,
+      data: {
+        loan: {
+          id: loan._id.toString(),
+          principalAmount: loan.principalAmount,
+          interestRate: loan.interestRate,
+          tenureMonths: loan.tenureMonths,
+          monthlyInstallment: loan.monthlyInstallment,
+          totalAmount: loan.totalAmount,
+          outstandingBalance: loan.outstandingBalance,
+          totalRepaid: loan.totalRepaid,
+          totalFines: loan.totalFines,
+          startDate: loan.startDate,
+          endDate: loan.endDate,
+          status: loan.status,
+          notes: loan.notes,
+          createdAt: loan.createdAt,
+        },
+        user: {
+          id: userDoc._id.toString(),
+          fullName: userDoc.fullName,
+          email: userDoc.email,
+          phone: userDoc.phone,
+          city: userDoc.city,
+          province: userDoc.province,
+          monthlyIncome: userDoc.monthlyIncome,
+          employmentType: userDoc.employmentType,
+        },
+        installmentStats: {
+          total: totalInstallments,
+          paid: paidInstallments,
+          pending: pendingInstallments,
+          overdue: overdueInstallments,
+          defaulted: defaultedInstallments,
+        },
+        installments: installments.map(i => ({
+          id: i._id.toString(),
+          installmentNumber: i.installmentNumber,
+          amount: i.amount,
+          fineAmount: i.fineAmount,
+          totalDue: i.totalDue,
+          dueDate: i.dueDate,
+          paidDate: i.paidDate,
+          status: i.status,
+          daysOverdue: i.daysOverdue,
+          gracePeriodEndDate: i.gracePeriodEndDate,
+        })),
+        paymentHistory,
+        riskAnalysis: loanRiskAnalysis,
+      },
+    });
+  } catch (err) {
+    console.error('getLoanById error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
  * PUT /api/admin/loans/:loanId
  */
 export const updateLoan = async (req: Request, res: Response) => {
@@ -1346,6 +1476,418 @@ export const triggerOverdueNotices = async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error('triggerOverdueNotices error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * GET /api/admin/analytics
+ * Get comprehensive analytics data for charts and insights
+ */
+export const getAnalytics = async (req: Request, res: Response) => {
+  try {
+    // Get month names helper
+    const getMonthName = (monthIndex: number) => {
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return months[monthIndex];
+    };
+
+    const [
+      defaultRateByTenure,
+      loanSizeDistribution,
+      repaymentTrend,
+      incomeVsDefault,
+      paymentBehavior,
+      insights,
+    ] = await Promise.all([
+      // 1. Default Rate by Tenure
+      (async () => {
+        const tenureGroups = [
+          { range: '6 months', min: 0, max: 6 },
+          { range: '12 months', min: 7, max: 12 },
+          { range: '18 months', min: 13, max: 18 },
+          { range: '24 months', min: 19, max: 30 },
+        ];
+
+        const results = await Promise.all(
+          tenureGroups.map(async (group) => {
+            const [totalLoans, defaultedLoans] = await Promise.all([
+              Loan.countDocuments({
+                tenureMonths: { $gte: group.min, $lte: group.max },
+              }),
+              Loan.countDocuments({
+                tenureMonths: { $gte: group.min, $lte: group.max },
+                status: LoanStatus.DEFAULTED,
+              }),
+            ]);
+
+            return {
+              tenure: group.range,
+              defaultRate: totalLoans > 0 ? (defaultedLoans / totalLoans) * 100 : 0,
+              totalLoans,
+            };
+          })
+        );
+
+        return results;
+      })(),
+
+      // 2. Loan Size Distribution
+      (async () => {
+        const sizeRanges = [
+          { range: '< 50K', min: 0, max: 50000 },
+          { range: '50K-100K', min: 50000, max: 100000 },
+          { range: '100K-150K', min: 100000, max: 150000 },
+          { range: '> 150K', min: 150000, max: Infinity },
+        ];
+
+        const results = await Promise.all(
+          sizeRanges.map(async (sizeRange) => {
+            const query: any = { principalAmount: { $gte: sizeRange.min } };
+            if (sizeRange.max !== Infinity) {
+              query.principalAmount.$lt = sizeRange.max;
+            }
+            const count = await Loan.countDocuments(query);
+            return {
+              range: sizeRange.range,
+              count,
+            };
+          })
+        );
+
+        return results;
+      })(),
+
+      // 3. Repayment Trend (Last 6 Months)
+      (async () => {
+        const now = new Date();
+        const trends = [];
+
+        for (let i = 5; i >= 0; i--) {
+          const monthDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          const nextMonthDate = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
+
+          const [paidInstallments, allInstallments] = await Promise.all([
+            Installment.aggregate([
+              {
+                $match: {
+                  dueDate: { $gte: monthDate, $lt: nextMonthDate },
+                  status: InstallmentStatus.PAID,
+                },
+              },
+              {
+                $group: {
+                  _id: null,
+                  collected: { $sum: '$amount' },
+                },
+              },
+            ]),
+            Installment.aggregate([
+              {
+                $match: {
+                  dueDate: { $gte: monthDate, $lt: nextMonthDate },
+                },
+              },
+              {
+                $group: {
+                  _id: null,
+                  expected: { $sum: '$amount' },
+                },
+              },
+            ]),
+          ]);
+
+          trends.push({
+            month: getMonthName(monthDate.getMonth()),
+            collected: paidInstallments[0]?.collected || 0,
+            expected: allInstallments[0]?.expected || 0,
+          });
+        }
+
+        return trends;
+      })(),
+
+      // 4. Income vs Default (using user monthly income)
+      (async () => {
+        const loans = await Loan.find().populate('userId').lean();
+        
+        return loans.map((loan: any) => {
+          const userDoc = loan.userId;
+          return {
+            income: userDoc?.monthlyIncome || 0,
+            loanAmount: loan.principalAmount,
+            defaulted: loan.status === LoanStatus.DEFAULTED,
+          };
+        });
+      })(),
+
+      // 5. Payment Behavior
+      (async () => {
+        const [onTime, late, overdue, defaulted] = await Promise.all([
+          Installment.countDocuments({
+            status: InstallmentStatus.PAID,
+            daysOverdue: 0,
+          }),
+          Installment.countDocuments({
+            status: InstallmentStatus.PAID,
+            daysOverdue: { $gt: 0 },
+          }),
+          Installment.countDocuments({ status: InstallmentStatus.OVERDUE }),
+          Installment.countDocuments({ status: InstallmentStatus.DEFAULTED }),
+        ]);
+
+        return [
+          { name: 'On-Time', value: onTime, color: '#10b981' },
+          { name: 'Late Paid', value: late, color: '#f59e0b' },
+          { name: 'Overdue', value: overdue, color: '#ef4444' },
+          { name: 'Defaulted', value: defaulted, color: '#7c3aed' },
+        ];
+      })(),
+
+      // 6. Key Insights
+      (async () => {
+        // Average days to default
+        const defaultedInstallments = await Installment.find({
+          status: InstallmentStatus.DEFAULTED,
+        });
+        const avgDaysToDefault =
+          defaultedInstallments.length > 0
+            ? defaultedInstallments.reduce((sum, i) => sum + i.daysOverdue, 0) /
+              defaultedInstallments.length
+            : 0;
+
+        // Collection efficiency (from last 6 months)
+        const sixMonthsAgo = new Date();
+        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+        
+        const [collected, expected] = await Promise.all([
+          Installment.aggregate([
+            {
+              $match: {
+                dueDate: { $gte: sixMonthsAgo },
+                status: InstallmentStatus.PAID,
+              },
+            },
+            { $group: { _id: null, total: { $sum: '$amount' } } },
+          ]),
+          Installment.aggregate([
+            {
+              $match: {
+                dueDate: { $gte: sixMonthsAgo },
+              },
+            },
+            { $group: { _id: null, total: { $sum: '$amount' } } },
+          ]),
+        ]);
+
+        const collectedAmount = collected[0]?.total || 0;
+        const expectedAmount = expected[0]?.total || 0;
+        const collectionEfficiency =
+          expectedAmount > 0 ? (collectedAmount / expectedAmount) * 100 : 0;
+
+        // Average loan-to-income ratio
+        const loansWithUsers = await Loan.find().populate('userId').lean();
+        let totalRatio = 0;
+        let validLoans = 0;
+
+        loansWithUsers.forEach((loan: any) => {
+          const userDoc = loan.userId;
+          if (userDoc?.monthlyIncome && userDoc.monthlyIncome > 0) {
+            totalRatio += loan.principalAmount / userDoc.monthlyIncome;
+            validLoans++;
+          }
+        });
+
+        const avgLoanToIncome = validLoans > 0 ? totalRatio / validLoans : 0;
+
+        // Early default rate (defaults within 12 months)
+        const [earlyDefaults, shortTermLoans] = await Promise.all([
+          Loan.countDocuments({
+            tenureMonths: { $lte: 12 },
+            status: LoanStatus.DEFAULTED,
+          }),
+          Loan.countDocuments({ tenureMonths: { $lte: 12 } }),
+        ]);
+
+        const earlyDefaultRate =
+          shortTermLoans > 0 ? (earlyDefaults / shortTermLoans) * 100 : 0;
+
+        return {
+          avgDaysToDefault: Math.round(avgDaysToDefault),
+          collectionEfficiency: Math.round(collectionEfficiency * 10) / 10,
+          avgLoanToIncome: Math.round(avgLoanToIncome * 10) / 10,
+          earlyDefaultRate: Math.round(earlyDefaultRate * 10) / 10,
+        };
+      })(),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        insights,
+        defaultRateByTenure,
+        loanSizeDistribution,
+        repaymentTrend,
+        incomeVsDefault,
+        paymentBehavior,
+      },
+    });
+  } catch (err) {
+    console.error('getAnalytics error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * Get User by ID with Loans and Risk Profile
+ * GET /api/admin/users/:userId
+ */
+export const getUserById = async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.params;
+
+    // Find user
+    const user = await User.findById(userId).lean();
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    // Get all loans for this user
+    const loans = await Loan.find({ userId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Calculate loan statistics
+    const loanStats = {
+      total: loans.length,
+      active: loans.filter((l) => l.status === LoanStatus.ACTIVE).length,
+      completed: loans.filter((l) => l.status === LoanStatus.COMPLETED).length,
+      defaulted: loans.filter((l) => l.status === LoanStatus.DEFAULTED).length,
+      totalBorrowed: loans.reduce((sum, l) => sum + l.principalAmount, 0),
+      totalOutstanding: loans.reduce((sum, l) => sum + l.outstandingBalance, 0),
+      totalRepaid: loans.reduce((sum, l) => sum + l.totalRepaid, 0),
+      totalFines: loans.reduce((sum, l) => sum + l.totalFines, 0),
+    };
+
+    // Get risk profile
+    const riskProfile = await RiskProfile.findOne({ userId }).lean();
+
+    // Get all installments for this user's loans
+    const loanIds = loans.map((l) => l._id);
+    const installments = await Installment.find({ loanId: { $in: loanIds } })
+      .sort({ dueDate: -1 })
+      .lean();
+
+    // Calculate installment statistics
+    const installmentStats = {
+      total: installments.length,
+      paid: installments.filter((i) => i.status === InstallmentStatus.PAID).length,
+      pending: installments.filter((i) => i.status === InstallmentStatus.PENDING).length,
+      overdue: installments.filter((i) => i.status === InstallmentStatus.OVERDUE).length,
+      defaulted: installments.filter((i) => i.status === InstallmentStatus.DEFAULTED).length,
+    };
+
+    // Payment behavior analysis
+    const paidInstallments = installments.filter((i) => i.status === InstallmentStatus.PAID);
+    const onTimePayments = paidInstallments.filter((i) => {
+      if (!i.paidAt) return false;
+      const paidDate = new Date(i.paidAt);
+      const dueDate = new Date(i.dueDate);
+      return paidDate <= dueDate;
+    }).length;
+
+    const latePayments = paidInstallments.filter((i) => {
+      if (!i.paidAt) return false;
+      const paidDate = new Date(i.paidAt);
+      const dueDate = new Date(i.dueDate);
+      return paidDate > dueDate;
+    }).length;
+
+    const paymentBehavior = {
+      totalPayments: paidInstallments.length,
+      onTimePayments,
+      latePayments,
+      missedPayments: installmentStats.overdue + installmentStats.defaulted,
+      onTimeRate: paidInstallments.length > 0 
+        ? Math.round((onTimePayments / paidInstallments.length) * 100) 
+        : 0,
+    };
+
+    // Recent payment history (last 10 payments)
+    const recentPayments = await PaymentTransaction.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .populate('loanId', 'principalAmount tenureMonths')
+      .lean();
+
+    return res.json({
+      success: true,
+      data: {
+        user: {
+          id: user._id,
+          fullName: user.fullName,
+          email: user.email,
+          phone: user.phone,
+          cnic: user.cnic,
+          address: user.address,
+          city: user.city,
+          province: user.province,
+          monthlyIncome: user.monthlyIncome,
+          employmentType: user.employmentType,
+          employerName: user.employerName,
+          status: user.status,
+          role: user.role,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt,
+        },
+        loanStats,
+        loans: loans.map((loan) => ({
+          id: loan._id,
+          principalAmount: loan.principalAmount,
+          interestRate: loan.interestRate,
+          tenureMonths: loan.tenureMonths,
+          monthlyInstallment: loan.monthlyInstallment,
+          totalAmount: loan.totalAmount,
+          outstandingBalance: loan.outstandingBalance,
+          totalRepaid: loan.totalRepaid,
+          totalFines: loan.totalFines,
+          status: loan.status,
+          nextInstallmentDate: loan.nextInstallmentDate,
+          createdAt: loan.createdAt,
+        })),
+        installmentStats,
+        paymentBehavior,
+        riskProfile: riskProfile ? {
+          riskLevel: riskProfile.riskLevel,
+          riskScore: riskProfile.riskScore,
+          defaultProbability: riskProfile.defaultProbability,
+          recommendedMaxLoan: riskProfile.recommendedMaxLoan,
+          recommendedTenure: riskProfile.recommendedTenure,
+          riskReasons: riskProfile.riskReasons,
+          lastUpdated: riskProfile.updatedAt,
+        } : null,
+        recentPayments: recentPayments.map((payment: any) => ({
+          id: payment._id,
+          amount: payment.amount,
+          type: payment.type,
+          status: payment.status,
+          loanId: payment.loanId?._id,
+          loanAmount: payment.loanId?.principalAmount,
+          createdAt: payment.createdAt,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error('getUserById error:', err);
     return res.status(500).json({
       success: false,
       message: 'Server error',
