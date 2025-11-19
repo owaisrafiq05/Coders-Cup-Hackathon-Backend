@@ -2,6 +2,7 @@ import { Request, Response } from 'express-serve-static-core';
 import jwt from 'jsonwebtoken';
 import User, { IUser, UserRole, UserStatus } from '../models/User';
 import { emailService } from '../services/emailService';
+import { riskScoringEngine } from '../ai/riskScoringEngine';
 
 // =========================
 // JWT Helpers
@@ -168,6 +169,17 @@ export const register = async (req: Request, res: Response) => {
     });
 
     await user.save();
+
+    // Create initial risk profile for the user
+    try {
+      await riskScoringEngine.calculateRiskScore(user._id.toString(), {
+        forceRecalculate: true,
+      });
+      console.log('Initial risk profile created for user:', user._id.toString());
+    } catch (riskError) {
+      console.error('Failed to create initial risk profile on registration:', riskError);
+      // Do NOT fail registration if risk profile creation fails; just log
+    }
 
     // Send OTP for verification
     try {
