@@ -841,7 +841,7 @@ export const getDefaults = async (req: Request, res: Response) => {
     const riskByUserId = new Map(
       riskProfiles.map((rp) => [rp.userId.toString(), rp.riskLevel])
     );
-
+    //reviewed
     const data = defaultedLoans.map((loan) => {
       const userDoc = loan.userId as any;
       const daysInDefault = loan.defaultedAt
