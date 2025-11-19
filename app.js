@@ -1,13 +1,20 @@
 // app.js
 require('dotenv').config();
 
-// Allow requiring .ts files directly
-require('ts-node').register({
-  transpileOnly: true,            // faster, fine for dev
-  compilerOptions: {
-    module: 'commonjs'
+// Allow requiring .ts files directly in non-production (dev) environments
+if (process.env.NODE_ENV !== 'production' && process.env.FORCE_TS_NODE !== '1') {
+  try {
+    require('ts-node').register({
+      transpileOnly: true, // faster for dev
+      compilerOptions: {
+        module: 'commonjs'
+      }
+    });
+    console.log('ts-node registered for runtime TypeScript support');
+  } catch (e) {
+    console.warn('ts-node not registered (not installed or running in production)');
   }
-});
+}
 
 const express = require('express');
 const bodyParser = require('body-parser');
