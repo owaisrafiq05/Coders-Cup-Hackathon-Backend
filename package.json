@@ -5,7 +5,7 @@
   "main": "app.js",
   "scripts": {
     "dev": "nodemon app.js",
-  "build": "tsc -p tsconfig.json && cp app.js dist/app.js",
+  "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('app.js','dist/app.js')\"",
     "start": "node dist/app.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
